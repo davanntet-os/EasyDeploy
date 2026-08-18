@@ -177,7 +177,21 @@ ALTER TABLE services ADD COLUMN IF NOT EXISTS advanced TEXT NOT NULL DEFAULT '{}
 -- Multi-environment routing: which Docker host (endpoint) a route/service is
 -- served on. 0 = local. Additive so existing rows default to the local host.
 ALTER TABLE routes    ADD COLUMN IF NOT EXISTS endpoint_id BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE services  ADD COLUMN IF NOT EXISTS endpoint_id BIGINT NOT NULL DEFAULT 0;`
+ALTER TABLE services  ADD COLUMN IF NOT EXISTS endpoint_id BIGINT NOT NULL DEFAULT 0;
+-- Per-user environment grants: which remote environments a member may use
+-- (admins may use all). The local host (id 0) is always allowed and not stored.
+-- Each grant carries a per-environment quota (0 = none granted yet).
+CREATE TABLE IF NOT EXISTS user_endpoints (
+    user_id         BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    endpoint_id     BIGINT NOT NULL REFERENCES endpoints(id) ON DELETE CASCADE,
+    cpu_quota_milli INTEGER NOT NULL DEFAULT 0,
+    mem_quota_mb    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, endpoint_id)
+);
+ALTER TABLE user_endpoints ADD COLUMN IF NOT EXISTS cpu_quota_milli INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE user_endpoints ADD COLUMN IF NOT EXISTS mem_quota_mb    INTEGER NOT NULL DEFAULT 0;
+-- Resource requests target a specific environment (0 = local).
+ALTER TABLE resource_requests ADD COLUMN IF NOT EXISTS endpoint_id BIGINT NOT NULL DEFAULT 0;`
 	if _, err := s.pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}

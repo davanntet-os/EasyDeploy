@@ -86,6 +86,36 @@ func (m *Manager) Create(ctx context.Context, name, host, caPEM, certPEM, keyPEM
 	})
 }
 
+// Update changes an endpoint's name, host, and optionally its TLS material,
+// then drops the cached client so the next request rebuilds the connection.
+// Empty cert material preserves the existing certs (so an SSH/name-only edit
+// doesn't wipe stored TLS).
+func (m *Manager) Update(ctx context.Context, id int64, name, host, caPEM, certPEM, keyPEM string) (store.Endpoint, error) {
+	if name == "" || host == "" {
+		return store.Endpoint{}, fmt.Errorf("name and host are required")
+	}
+	cur, err := m.store.GetEndpoint(ctx, id)
+	if err != nil {
+		return store.Endpoint{}, err
+	}
+	caEnc, certEnc, keyEnc := cur.TLSCAEnc, cur.TLSCertEnc, cur.TLSKeyEnc
+	if certPEM != "" { // new TLS material supplied → re-encrypt all three
+		caEnc, _ = m.box.Encrypt(caPEM)
+		certEnc, _ = m.box.Encrypt(certPEM)
+		keyEnc, _ = m.box.Encrypt(keyPEM)
+	}
+	ep := store.Endpoint{ID: id, Name: name, Host: host, TLSCAEnc: caEnc, TLSCertEnc: certEnc, TLSKeyEnc: keyEnc}
+	if err := m.store.UpdateEndpoint(ctx, ep); err != nil {
+		return store.Endpoint{}, err
+	}
+	m.mu.Lock()
+	delete(m.clients, id) // rebuild on next use
+	m.mu.Unlock()
+	ep.TLS = certEnc != ""
+	ep.CreatedAt = cur.CreatedAt
+	return ep, nil
+}
+
 // Delete removes an endpoint and drops any cached client.
 func (m *Manager) Delete(ctx context.Context, id int64) error {
 	m.mu.Lock()

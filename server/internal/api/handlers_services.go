@@ -150,7 +150,7 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	if req.Autoscale && req.MaxReplicas > effReplicas {
 		effReplicas = req.MaxReplicas
 	}
-	owner, err := s.enforceServiceQuota(r.Context(), effReplicas, req.CPUMilli, req.MemMB, "")
+	owner, err := s.enforceServiceQuota(r, effReplicas, req.CPUMilli, req.MemMB, "")
 	if err != nil {
 		writeErr(w, http.StatusForbidden, err)
 		return
@@ -229,7 +229,7 @@ func (s *Server) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 	}
 	// Enforce quota, excluding this service's own (about-to-be-replaced)
 	// replicas so an unchanged edit isn't rejected against itself.
-	if _, err := s.enforceServiceQuota(r.Context(), effReplicas, req.CPUMilli, req.MemMB, cur.Name); err != nil {
+	if _, err := s.enforceServiceQuota(r, effReplicas, req.CPUMilli, req.MemMB, cur.Name); err != nil {
 		writeErr(w, http.StatusForbidden, err)
 		return
 	}
@@ -364,10 +364,12 @@ func (s *Server) ownedService(r *http.Request) (store.Service, error) {
 
 // enforceServiceQuota checks a member has room for replicas*limits and returns
 // the owner username to stamp on the service.
-// enforceServiceQuota validates a member's request against their quota.
-// excludeService, when set, omits that service's current replicas from the
-// live-usage total (used on edit so a service isn't counted against itself).
-func (s *Server) enforceServiceQuota(ctx context.Context, replicas, cpuMilli, memMB int, excludeService string) (string, error) {
+// enforceServiceQuota validates a member's request against their quota, counting
+// their live usage on the *target* environment (so a member's footprint is
+// bounded per host they can deploy to). excludeService, when set, omits that
+// service's current replicas from the total (used on edit).
+func (s *Server) enforceServiceQuota(r *http.Request, replicas, cpuMilli, memMB int, excludeService string) (string, error) {
+	ctx := r.Context()
 	p := auth.Current(ctx)
 	user, err := s.store.GetUserByID(ctx, p.UserID)
 	if err != nil {
@@ -376,22 +378,40 @@ func (s *Server) enforceServiceQuota(ctx context.Context, replicas, cpuMilli, me
 	if user.Role == store.RoleAdmin {
 		return user.Username, nil
 	}
-	if user.CPUQuotaMilli <= 0 || user.MemQuotaMB <= 0 {
-		return "", fmt.Errorf("no resource quota granted yet — submit a request and wait for admin approval")
+	// Quota is per environment: the local host uses the user's base quota; a
+	// remote host uses the quota granted on that host.
+	env := endpointID(r)
+	quotaCPU, quotaMem := user.CPUQuotaMilli, user.MemQuotaMB
+	if env != 0 {
+		g, ok, err := s.store.GetUserEndpointQuota(ctx, user.ID, env)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "", fmt.Errorf("no access to this environment")
+		}
+		quotaCPU, quotaMem = g.CPUQuotaMilli, g.MemQuotaMB
+	}
+	if quotaCPU <= 0 || quotaMem <= 0 {
+		return "", fmt.Errorf("no resource quota granted yet on this environment — submit a request and wait for admin approval")
 	}
 	if cpuMilli <= 0 || memMB <= 0 {
 		return "", fmt.Errorf("cpu (millicores) and memory (MB) per replica are required")
 	}
-	usedNano, usedMem, err := s.docker.OwnerUsageExcludingService(ctx, user.Username, excludeService)
+	cli, err := s.clientFor(r)
+	if err != nil {
+		return "", err
+	}
+	usedNano, usedMem, err := cli.OwnerUsageExcludingService(ctx, user.Username, excludeService)
 	if err != nil {
 		return "", err
 	}
 	needCPU := usedNano/nanoPerMilliCPU + int64(replicas*cpuMilli)
 	needMem := usedMem/bytesPerMB + int64(replicas*memMB)
-	if needCPU > int64(user.CPUQuotaMilli) || needMem > int64(user.MemQuotaMB) {
+	if needCPU > int64(quotaCPU) || needMem > int64(quotaMem) {
 		return "", fmt.Errorf(
 			"exceeds quota: %d replicas x %dm/%dMB plus current use exceeds quota %dm/%dMB",
-			replicas, cpuMilli, memMB, user.CPUQuotaMilli, user.MemQuotaMB)
+			replicas, cpuMilli, memMB, quotaCPU, quotaMem)
 	}
 	return user.Username, nil
 }

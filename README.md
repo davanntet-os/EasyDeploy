@@ -168,3 +168,19 @@ Also protect EasyDeploy itself (it's the gateway to every host): serve its API
 over HTTPS, keep the secrets above strong, and don't expose port 8080 publicly.
 Consider running the daemon **rootless** or with **userns-remap**, and putting a
 **docker-socket-proxy** in front of the local socket to limit blast radius.
+
+## License
+
+EasyDeploy is licensed under the **[Apache License 2.0](LICENSE)**.
+Copyright © 2026 Davann Tet.
+
+You are free to use, modify, and redistribute it (including commercially), but
+you must:
+
+- **keep the copyright and [`NOTICE`](NOTICE)** — you may not remove the original
+  author's copyright or claim authorship of the original work;
+- **state your changes** — mark any files you modify as changed;
+- **not use the "EasyDeploy" name or marks** to endorse or promote your fork
+  (the license grants no trademark rights).
+
+See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) for the full terms.

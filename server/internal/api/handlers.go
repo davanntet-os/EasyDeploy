@@ -280,6 +280,26 @@ func (s *Server) handleVolumeUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleVolumeNames returns just the volume names on the selected host — a
+// lightweight, non-admin list so the service form can offer existing volumes as
+// mount sources.
+func (s *Server) handleVolumeNames(w http.ResponseWriter, r *http.Request) {
+	cli, ok := s.dockerOr502(w, r)
+	if !ok {
+		return
+	}
+	vols, err := cli.ListVolumes(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	names := make([]string, 0, len(vols))
+	for _, v := range vols {
+		names = append(names, v.Name)
+	}
+	writeJSON(w, http.StatusOK, names)
+}
+
 func (s *Server) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 	cli, err := s.clientFor(r)
 	if err != nil {

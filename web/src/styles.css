@@ -159,6 +159,20 @@ a:focus-visible, button:focus-visible, .side-nav button:focus-visible,
 .env-actions { align-items: center; }
 .env-foot { flex: 1; font-size: 12px; }
 
+/* ---- environments management tab ---- */
+.env-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
+.env-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 12px; box-shadow: var(--shadow-1); }
+.env-card.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.env-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.env-card-name { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; min-width: 0; }
+.env-card-meta { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.env-card-host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.env-edge { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 10px; background: var(--bg-elev); border: 1px solid var(--border); }
+.env-edge-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.env-edge .actions { flex-wrap: wrap; }
+.env-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--border); padding-top: 12px; }
+.env-card-actions .muted { display: inline-flex; align-items: center; gap: 6px; }
+
 .whoami { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
 .role-tag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 6px; border-radius: 5px; background: var(--border); color: var(--muted); }
 .role-tag.admin { background: color-mix(in srgb, var(--accent) 22%, transparent); color: #a9c6ff; }
@@ -415,6 +429,19 @@ input:disabled { opacity: 0.5; }
 .quota-bar { display: inline-block; width: 54px; height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; }
 .quota-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), #7b5cff); transition: width 0.3s; }
 
+/* editable role in the users table */
+.role-select { padding: 5px 8px; font-size: 13px; min-width: 106px; }
+
+/* checkbox list (environment grants) */
+.check-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.check-list .check { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-elev); cursor: pointer; }
+.check-list .check:hover { border-color: var(--border-strong); }
+.check-list .check input { width: auto; }
+.check-list .check .mono { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+.env-grant { display: flex; flex-direction: column; gap: 8px; }
+.env-grant-quota { display: flex; gap: 12px; padding-left: 30px; }
+.env-grant-quota label { flex: 1; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+
 /* ---- inline quota editor in users table ---- */
 .quota-edit { display: inline-flex; align-items: center; gap: 6px; }
 .quota-edit input { width: 72px; padding: 5px 8px; }
@@ -513,6 +540,7 @@ input:disabled { opacity: 0.5; }
 .check { flex-direction: row !important; align-items: center; gap: 8px !important; }
 .check input { width: auto; }
 .modal-body.wide { width: min(640px, 94vw); }
+.modal-body.narrow { width: min(440px, 94vw); }
 input[readonly] { opacity: 0.8; }
 
 /* ===== service wizard (sectioned form) ===== */
@@ -583,6 +611,24 @@ input[readonly] { opacity: 0.8; }
 .adv-sep { color: var(--muted); }
 .adv-check { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .adv-check input { width: auto; }
+
+/* searchable volume picker (mount source) */
+.vol-picker { position: relative; flex: 1; min-width: 60px; }
+.vol-picker input { width: 100%; }
+.vol-picker-list {
+  position: absolute; z-index: 5; left: 0; right: 0; top: calc(100% + 4px);
+  margin: 0; padding: 4px; list-style: none; max-height: 220px; overflow-y: auto;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-2);
+}
+.vol-picker-list li { margin: 0; }
+.vol-picker-list button {
+  width: 100%; display: flex; align-items: center; gap: 8px; padding: 7px 9px;
+  background: transparent; border: none; border-radius: 7px; text-align: left; font-size: 13px;
+  font-family: ui-monospace, monospace; color: var(--text);
+}
+.vol-picker-list button:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.vol-picker-list svg { color: var(--accent); flex: 0 0 auto; }
+.vol-picker-list span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- volume browser ---- */
 .vol-path { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }

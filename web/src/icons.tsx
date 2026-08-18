@@ -224,6 +224,12 @@ export const Icon = {
       <path d="M21 21l-4.35-4.35" />
     </Svg>
   ),
+  Key: (p: IconProps) => (
+    <Svg {...p}>
+      <circle cx="7.5" cy="15.5" r="4" />
+      <path d="M10.3 12.7L20 3M16.5 6.5l2.5 2.5M13.5 9.5l2.5 2.5" />
+    </Svg>
+  ),
   Drive: (p: IconProps) => (
     <Svg {...p}>
       <rect x="3" y="5" width="18" height="14" rx="2" />

@@ -11,6 +11,7 @@ var (
 	errNotFound          = errors.New("not found")
 	errForbidden         = errors.New("you do not have access to this resource")
 	errCannotDeleteLocal = errors.New("the local environment cannot be deleted")
+	errNoEndpointAccess  = errors.New("you do not have access to this environment")
 )
 
 func errString(err error) string {

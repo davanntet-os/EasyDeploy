@@ -29,7 +29,7 @@ import { ActivityBar, Toaster, toast, run, useAction } from "./ui";
 import { Shell } from "./Terminal";
 import { Monitor } from "./Monitor";
 import { AdvancedPanel, emptyAdvForm, buildAdvanced, advToForm, type AdvForm } from "./ServiceAdvanced";
-import { Section, Field, SourceSelector } from "./FormKit";
+import { Section, Field, SourceSelector, SearchPicker } from "./FormKit";
 
 type Tab =
   | "overview"
@@ -40,6 +40,7 @@ type Tab =
   | "routes"
   | "registries"
   | "expose"
+  | "environments"
   | "users"
   | "requests";
 
@@ -52,13 +53,14 @@ const TAB_META: Record<Tab, { icon: (p: { size?: number }) => JSX.Element; label
   routes: { icon: Icon.Route, label: "Routes" },
   registries: { icon: Icon.Registry, label: "Registries" },
   expose: { icon: Icon.Globe, label: "Expose" },
+  environments: { icon: Icon.Server, label: "Environments" },
   users: { icon: Icon.Users, label: "Users" },
   requests: { icon: Icon.Inbox, label: "Requests" },
 };
 
 // Tabs visible per role. Members get a reduced surface centered on their
 // services and resource requests.
-const ADMIN_TABS: Tab[] = ["overview", "containers", "services", "networks", "volumes", "routes", "registries", "expose", "users", "requests"];
+const ADMIN_TABS: Tab[] = ["overview", "containers", "services", "networks", "volumes", "routes", "registries", "expose", "environments", "users", "requests"];
 const MEMBER_TABS: Tab[] = ["overview", "containers", "services", "requests"];
 
 export function App() {
@@ -246,7 +248,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             })()}
           </h2>
           <div className="topbar-right">
-            {isAdmin && <EnvSwitcher />}
+            <EnvSwitcher canManage={!!isAdmin} />
             {me && me.role === "member" && <QuotaPill me={me} />}
             {me && (
               <span className="whoami" title={`Signed in as ${me.username} (${me.role})`}>
@@ -274,6 +276,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           {activeTab === "routes" && <Routes />}
           {activeTab === "registries" && <Registries />}
           {activeTab === "expose" && <Expose />}
+          {activeTab === "environments" && <Environments />}
           {activeTab === "users" && <Users />}
           {activeTab === "requests" && <Requests isAdmin={!!isAdmin} onReviewed={refreshMe} />}
             </>
@@ -292,8 +295,9 @@ function dotState(ok: boolean | undefined): string {
   return ok ? "ok" : "bad";
 }
 
-// EnvSwitcher is the multi-host environment selector in the topbar.
-function EnvSwitcher() {
+// EnvSwitcher is the multi-host environment selector in the topbar. Members see
+// only the environments granted to them (backend-filtered) and can't manage.
+function EnvSwitcher({ canManage }: { canManage: boolean }) {
   const [list, , reload] = useAsync<Endpoint[]>(() => api.endpoints(), []);
   const [status, setStatus] = useState<Record<number, boolean>>({});
   const [open, setOpen] = useState(false);
@@ -307,6 +311,9 @@ function EnvSwitcher() {
   }, [list]);
 
   const current = list?.find((e) => e.id === curId);
+  // Nothing to switch between: a member with only the local host doesn't need
+  // the switcher at all.
+  if (list && list.length <= 1 && !canManage) return null;
   const select = (id: number) => {
     environment.set(id);
     setOpen(false);
@@ -340,16 +347,18 @@ function EnvSwitcher() {
                   <span className="env-name">{e.name}</span>
                   <span className="muted mono env-host">{e.host}</span>
                 </button>
-                {!e.local && (
+                {canManage && !e.local && (
                   <button type="button" className="btn-icon danger" title="Remove" onClick={() => remove(e)}>
                     <Icon.Trash size={13} />
                   </button>
                 )}
               </div>
             ))}
-            <button type="button" className="env-add" onClick={() => { setOpen(false); setAdding(true); }}>
-              <Icon.Plus size={14} /> <span>Add environment</span>
-            </button>
+            {canManage && (
+              <button type="button" className="env-add" onClick={() => { setOpen(false); setAdding(true); }}>
+                <Icon.Plus size={14} /> <span>Add environment</span>
+              </button>
+            )}
           </div>
         </>
       )}
@@ -360,9 +369,16 @@ function EnvSwitcher() {
 
 type ConnMode = "ssh" | "tls" | "plain";
 
-function EnvModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
-  const [mode, setMode] = useState<ConnMode>("ssh");
-  const [f, setF] = useState({ name: "", host: "", port: "", tlsCa: "", tlsCert: "", tlsKey: "" });
+function EnvModal({ editing, onClose, onAdded }: { editing?: Endpoint; onClose: () => void; onAdded: () => void }) {
+  const initialMode: ConnMode = editing
+    ? editing.host.startsWith("ssh://")
+      ? "ssh"
+      : editing.tls
+        ? "tls"
+        : "plain"
+    : "ssh";
+  const [mode, setMode] = useState<ConnMode>(initialMode);
+  const [f, setF] = useState({ name: editing?.name ?? "", host: editing?.host ?? "", port: "", tlsCa: "", tlsCert: "", tlsKey: "" });
   const [busy, setBusy] = useState(false);
 
   const hostHint =
@@ -381,11 +397,15 @@ function EnvModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => vo
     e.preventDefault();
     setBusy(true);
     const host = sshHost();
+    // On edit, TLS material is only sent when re-entered (blank preserves the
+    // stored certs), so include it only if a cert was typed.
     const body =
-      mode === "tls"
+      mode === "tls" && (f.tlsCert || !editing)
         ? { name: f.name, host, tlsCa: f.tlsCa, tlsCert: f.tlsCert, tlsKey: f.tlsKey }
         : { name: f.name, host };
-    const res = await run(api.createEndpoint(body), { success: `Added ${f.name}` });
+    const res = editing
+      ? await run(api.updateEndpoint(editing.id, body), { success: `Updated ${f.name}` })
+      : await run(api.createEndpoint(body), { success: `Added ${f.name}` });
     setBusy(false);
     if (res) onAdded();
   };
@@ -401,7 +421,7 @@ function EnvModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => vo
       <div className="modal-body env-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <strong>
-            <Icon.Server size={15} /> Add environment
+            <Icon.Server size={15} /> {editing ? `Edit ${editing.name}` : "Add environment"}
           </strong>
           <button type="button" onClick={onClose} aria-label="Close">
             <Icon.Close size={16} />
@@ -468,15 +488,16 @@ function EnvModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => vo
           )}
           {mode === "tls" && (
             <div className="conn-tls">
-              <Field label="CA certificate (PEM)" required help="Required — verifies the daemon's identity">
-                <textarea required rows={2} value={f.tlsCa} onChange={(e) => setF({ ...f, tlsCa: e.target.value })} />
+              {editing && <p className="hint">Leave the certificate fields blank to keep the stored ones; fill them to replace.</p>}
+              <Field label="CA certificate (PEM)" required={!editing} help="Verifies the daemon's identity">
+                <textarea required={!editing} rows={2} value={f.tlsCa} onChange={(e) => setF({ ...f, tlsCa: e.target.value })} />
               </Field>
               <div className="row">
-                <Field label="Client cert (PEM)" required>
-                  <textarea required rows={2} value={f.tlsCert} onChange={(e) => setF({ ...f, tlsCert: e.target.value })} />
+                <Field label="Client cert (PEM)" required={!editing}>
+                  <textarea required={!editing} rows={2} value={f.tlsCert} onChange={(e) => setF({ ...f, tlsCert: e.target.value })} />
                 </Field>
-                <Field label="Client key (PEM)" required>
-                  <textarea required rows={2} value={f.tlsKey} onChange={(e) => setF({ ...f, tlsKey: e.target.value })} />
+                <Field label="Client key (PEM)" required={!editing}>
+                  <textarea required={!editing} rows={2} value={f.tlsKey} onChange={(e) => setF({ ...f, tlsKey: e.target.value })} />
                 </Field>
               </div>
             </div>
@@ -488,8 +509,8 @@ function EnvModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => vo
               Cancel
             </button>
             <button type="submit" className="primary" disabled={busy}>
-              {busy ? <Icon.Spinner size={15} /> : <Icon.Plus size={15} />}
-              <span>Add environment</span>
+              {busy ? <Icon.Spinner size={15} /> : editing ? <Icon.Check2 size={15} /> : <Icon.Plus size={15} />}
+              <span>{editing ? "Save changes" : "Add environment"}</span>
             </button>
           </div>
         </form>
@@ -576,8 +597,10 @@ function EnvHealth({ endpoints, onSwitch }: { endpoints: Endpoint[] | null; onSw
 function Overview({ me, isAdmin, onGo }: { me: Me | null; isAdmin: boolean; onGo: (t: Tab) => void }) {
   const [containers] = useAsync<Container[]>(() => api.containers(), []);
   const [services] = useAsync<Service[]>(() => api.services(), []);
-  const [images] = useAsync<unknown[]>(() => api.images(), []);
-  const [networks] = useAsync<DockerNetwork[]>(() => api.networks(), []);
+  // Networks, volumes, and images are admin-only infrastructure — members never
+  // fetch them (the endpoints would 403).
+  const [images] = useAsync<unknown[]>(() => (isAdmin ? api.images() : Promise.resolve([])), [isAdmin]);
+  const [networks] = useAsync<DockerNetwork[]>(() => (isAdmin ? api.networks() : Promise.resolve([] as DockerNetwork[])), [isAdmin]);
   const [volumes] = useAsync<DockerVolume[]>(() => (isAdmin ? api.volumes() : Promise.resolve([] as DockerVolume[])), [isAdmin]);
   const [endpoints] = useAsync<Endpoint[]>(() => (isAdmin ? api.endpoints() : Promise.resolve([] as Endpoint[])), [isAdmin]);
   const [pending] = useAsync<ResourceRequest[]>(() => api.requests("pending"), []);
@@ -592,9 +615,9 @@ function Overview({ me, isAdmin, onGo }: { me: Me | null; isAdmin: boolean; onGo
         <StatTile icon={Icon.Play2} label="Running" value={running} accent="ok" onClick={() => onGo("containers")} />
         <StatTile icon={Icon.Stop} label="Stopped" value={stopped} accent="muted" onClick={() => onGo("containers")} />
         <StatTile icon={Icon.Layers} label="Services" value={num(services)} accent="accent" onClick={() => onGo("services")} />
-        <StatTile icon={Icon.Network} label="Networks" value={num(networks)} accent="accent" onClick={() => onGo("networks")} />
+        {isAdmin && <StatTile icon={Icon.Network} label="Networks" value={num(networks)} accent="accent" onClick={() => onGo("networks")} />}
         {isAdmin && <StatTile icon={Icon.Drive} label="Volumes" value={num(volumes)} accent="accent" onClick={() => onGo("volumes")} />}
-        <StatTile icon={Icon.Registry} label="Images" value={num(images)} accent="accent" />
+        {isAdmin && <StatTile icon={Icon.Registry} label="Images" value={num(images)} accent="accent" />}
       </div>
 
       <div className="ov-cols">
@@ -882,6 +905,66 @@ function SearchInput({ value, onChange, placeholder }: { value: string; onChange
           <Icon.Close size={13} />
         </button>
       )}
+    </div>
+  );
+}
+
+// NameCreateModal is a small popup form for resources created from a single
+// name (networks, volumes). onCreate returns undefined on failure so the modal
+// stays open; anything else closes it.
+function NameCreateModal({
+  title,
+  label,
+  placeholder,
+  hint,
+  onCreate,
+  onClose,
+}: {
+  title: string;
+  label: string;
+  placeholder: string;
+  hint?: string;
+  onCreate: (name: string) => Promise<unknown>;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setBusy(true);
+    const ok = await onCreate(name.trim());
+    setBusy(false);
+    if (ok !== undefined) onClose();
+  };
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body narrow" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong>
+            <Icon.Plus size={15} /> {title}
+          </strong>
+          <button type="button" onClick={onClose} aria-label="Close">
+            <Icon.Close size={16} />
+          </button>
+        </div>
+        <form className="form modal-pad" onSubmit={submit}>
+          <label>
+            {label}
+            <input autoFocus value={name} placeholder={placeholder} onChange={(e) => setName(e.target.value)} />
+          </label>
+          {hint && <p className="hint">{hint}</p>}
+          <div className="actions" style={{ justifyContent: "flex-end" }}>
+            <button type="button" onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+            <button type="submit" className="primary" disabled={busy || !name.trim()}>
+              {busy ? <Icon.Spinner size={15} /> : <Icon.Plus size={15} />}
+              <span>Create</span>
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -1518,19 +1601,9 @@ const matchNetwork = (n: DockerNetwork, q: string) =>
 
 function Networks() {
   const [list, err, reload] = useAsync<DockerNetwork[]>(() => api.networks(), []);
-  const [name, setName] = useState("");
+  const [creating, setCreating] = useState(false);
   const sp = useSearchPage(list ?? [], matchNetwork, 12);
 
-  const create = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      await api.createNetwork(name);
-      setName("");
-      reload();
-    } catch (e) {
-      toast("error", String(e));
-    }
-  };
   const del = async (id: string) => {
     try {
       await api.removeNetwork(id);
@@ -1544,14 +1617,23 @@ function Networks() {
   if (!list) return <TableSkeleton cols={5} />;
   return (
     <>
-      <form className="form inline" onSubmit={create}>
-        <input placeholder="new-network-name" value={name} onChange={(e) => setName(e.target.value)} />
-        <button type="submit">Create network</button>
-      </form>
       <div className="toolbar">
-        <SearchInput value={sp.query} onChange={sp.setQuery} placeholder="Search networks…" />
-        <span className="count">{sp.filtered.length} of {list.length}</span>
+        <button type="button" className="primary" onClick={() => setCreating(true)}>
+          <Icon.Plus size={15} /> <span>New network</span>
+        </button>
+        {list.length > 0 && <SearchInput value={sp.query} onChange={sp.setQuery} placeholder="Search networks…" />}
+        <span className="count">{sp.filtered.length} of {list.length} network{list.length === 1 ? "" : "s"}</span>
       </div>
+      {creating && (
+        <NameCreateModal
+          title="New network"
+          label="Network name"
+          placeholder="my-network"
+          hint="Created with the bridge driver on this host."
+          onCreate={(n) => run(api.createNetwork(n), { success: `Created network ${n}` }).then((r) => (r !== undefined ? (reload(), r) : undefined))}
+          onClose={() => setCreating(false)}
+        />
+      )}
       <div className="table-wrap"><table>
         <thead>
           <tr>
@@ -1713,89 +1795,189 @@ function Registries() {
   );
 }
 
-function Users() {
-  const [list, err, reload] = useAsync<User[]>(() => api.users(), []);
-  const [form, setForm] = useState({ username: "", password: "", role: "member" as Role, cpuCores: 1, memMB: 512 });
-  const [busy, setBusy] = useState(false);
+// Environments is the dedicated multi-host management view: every Docker host
+// with its live status, connection type, and (for remotes) the edge proxy.
+function connType(e: Endpoint): string {
+  if (e.local) return "Local socket";
+  if (e.host.startsWith("ssh://")) return "SSH tunnel";
+  return e.tls ? "TCP + TLS" : "Plain TCP";
+}
 
-  const create = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    const res = await run(
-      api.createUser({
-        username: form.username,
-        password: form.password,
-        role: form.role,
-        cpuQuotaMilli: Math.round(form.cpuCores * 1000),
-        memQuotaMB: form.memMB,
-      }),
-      { success: `Created ${form.username}` }
-    );
-    setBusy(false);
-    if (res) {
-      setForm({ username: "", password: "", role: "member", cpuCores: 1, memMB: 512 });
-      reload();
-    }
-  };
+function Environments() {
+  const [list, err, reload] = useAsync<Endpoint[]>(() => api.endpoints(), []);
+  const [status, setStatus] = useState<Record<number, { ok: boolean; version: string }>>({});
+  const [edges, setEdges] = useState<Record<number, EdgeStatus>>({});
+  const [adding, setAdding] = useState(false);
+  const [editingEnv, setEditingEnv] = useState<Endpoint | null>(null);
+  const [curId, setCurId] = useState(environment.get());
+
+  useEffect(() => environment.subscribe(() => setCurId(environment.get())), []);
+  useEffect(() => {
+    if (!list) return;
+    list.forEach((e) => {
+      api
+        .endpointStatus(e.id)
+        .then((s) => {
+          setStatus((p) => ({ ...p, [e.id]: s }));
+          // Only probe the edge proxy on a reachable remote — otherwise the
+          // (unbounded) inspect over SSH hangs on a dead host.
+          if (!e.local && s.ok) {
+            api.edgeStatus(e.id).then((es) => setEdges((p) => ({ ...p, [e.id]: es }))).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    });
+  }, [list]);
+
+  const refreshEdge = (id: number) =>
+    api.edgeStatus(id).then((s) => setEdges((p) => ({ ...p, [id]: s }))).catch(() => {});
+
+  if (err) return <Err msg={err} onRetry={reload} />;
+  if (!list) return <CardSkeleton count={2} className="env-grid" />;
 
   return (
-    <div className="expose">
-      <section>
-        <h3>Add user</h3>
-        <form className="form" onSubmit={create}>
-          <div className="row">
-            <label>
-              Username
-              <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
-            </label>
-            <label>
-              Password
-              <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
-            </label>
-          </div>
-          <div className="row">
-            <label>
-              Role
-              <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })}>
-                <option value="member">member</option>
-                <option value="admin">admin</option>
-              </select>
-            </label>
-            <label>
-              CPU quota (cores)
-              <input
-                type="number"
-                step="0.1"
-                min="0"
-                value={form.cpuCores}
-                disabled={form.role === "admin"}
-                onChange={(e) => setForm({ ...form, cpuCores: Number(e.target.value) })}
-              />
-            </label>
-            <label>
-              Memory quota (MB)
-              <input
-                type="number"
-                min="0"
-                value={form.memMB}
-                disabled={form.role === "admin"}
-                onChange={(e) => setForm({ ...form, memMB: Number(e.target.value) })}
-              />
-            </label>
-          </div>
-          <button type="submit" className="primary" disabled={busy}>
-            {busy ? <Icon.Spinner size={15} /> : <Icon.Plus size={15} />}
-            <span>Create user</span>
-          </button>
-        </form>
-      </section>
+    <>
+      <div className="toolbar">
+        <button type="button" className="primary" onClick={() => setAdding(true)}>
+          <Icon.Plus size={15} /> <span>New environment</span>
+        </button>
+        <span className="count">{list.length} environment{list.length === 1 ? "" : "s"}</span>
+      </div>
+      <div className="env-grid">
+        {list.map((e) => {
+          const st = status[e.id];
+          const edge = edges[e.id];
+          const active = e.id === curId;
+          const edgeText = edge
+            ? edge.running
+              ? `running · port ${edge.hostPort}`
+              : edge.present
+                ? "stopped"
+                : "not deployed"
+            : "checking…";
+          return (
+            <div key={e.id} className={`env-card ${active ? "active" : ""}`}>
+              <div className="env-card-head">
+                <span className="env-card-name">
+                  <Icon.Server size={15} /> {e.name}
+                  {active && <span className="dom-tag">current</span>}
+                </span>
+                <span className={`badge ${st?.ok ? "running" : st === undefined ? "" : "exited"}`}>
+                  <span className="badge-dot" /> {st === undefined ? "checking" : st.ok ? "online" : "offline"}
+                </span>
+              </div>
+              <div className="env-card-meta">
+                <span className="muted mono env-card-host" title={e.host}>{e.host}</span>
+                <span className="muted">
+                  {connType(e)}
+                  {st?.version ? ` · Docker ${st.version}` : ""}
+                </span>
+              </div>
 
-      <section>
-        <h3>Accounts</h3>
-        {err && <Err msg={err} onRetry={reload} />}
-        {!list ? (
-          <TableSkeleton cols={4} />
-        ) : (
+              {!e.local && (
+                <div className="env-edge">
+                  <span className="muted env-edge-status">
+                    <Icon.Globe size={13} /> Edge proxy: {edgeText}
+                  </span>
+                  <div className="actions">
+                    <ActionButton
+                      icon={Icon.Rocket}
+                      label={edge?.present ? "Redeploy" : "Deploy"}
+                      title="Deploy the edge Envoy so routes/services work on this host"
+                      success="Edge proxy deployed"
+                      task={() => api.deployEdge(e.id)}
+                      onDone={() => refreshEdge(e.id)}
+                    />
+                    {edge?.present && (
+                      <ActionButton
+                        icon={Icon.Trash}
+                        label="Remove edge"
+                        variant="danger"
+                        confirm="Remove the edge proxy? Routes/services on this host stop being served."
+                        success="Edge proxy removed"
+                        task={() => api.removeEdge(e.id)}
+                        onDone={() => refreshEdge(e.id)}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="env-card-actions">
+                {active ? (
+                  <span className="muted">
+                    <Icon.Check size={14} /> Selected
+                  </span>
+                ) : (
+                  <button type="button" onClick={() => environment.set(e.id)}>
+                    <Icon.Server size={14} /> <span>Switch to</span>
+                  </button>
+                )}
+                {!e.local && (
+                  <span className="actions" style={{ marginLeft: "auto" }}>
+                    <button type="button" onClick={() => setEditingEnv(e)}>
+                      <Icon.Edit size={14} /> <span>Edit</span>
+                    </button>
+                    <ActionButton
+                      icon={Icon.Trash}
+                      label="Remove"
+                      variant="danger"
+                      confirm={`Remove environment ${e.name}?`}
+                      success={`Removed ${e.name}`}
+                      task={() => api.deleteEndpoint(e.id)}
+                      onDone={() => {
+                        if (curId === e.id) environment.set(0);
+                        reload();
+                      }}
+                    />
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {(adding || editingEnv) && (
+        <EnvModal
+          editing={editingEnv ?? undefined}
+          onClose={() => {
+            setAdding(false);
+            setEditingEnv(null);
+          }}
+          onAdded={() => {
+            setAdding(false);
+            setEditingEnv(null);
+            reload();
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+const matchUser = (u: User, q: string) => u.username.toLowerCase().includes(q) || u.role.toLowerCase().includes(q);
+
+function Users() {
+  const [list, err, reload] = useAsync<User[]>(() => api.users(), []);
+  const [creating, setCreating] = useState(false);
+  const sp = useSearchPage(list ?? [], matchUser, 12);
+
+  if (err) return <Err msg={err} onRetry={reload} />;
+  if (!list) return <TableSkeleton cols={4} />;
+
+  return (
+    <>
+      <div className="toolbar">
+        <button type="button" className="primary" onClick={() => setCreating(true)}>
+          <Icon.Plus size={15} /> <span>New user</span>
+        </button>
+        {list.length > 0 && <SearchInput value={sp.query} onChange={sp.setQuery} placeholder="Search users…" />}
+        <span className="count">{sp.filtered.length} of {list.length} user{list.length === 1 ? "" : "s"}</span>
+      </div>
+      {sp.filtered.length === 0 ? (
+        <Empty icon={Icon.Search} title="No matches" hint="No users match your search." />
+      ) : (
+        <>
           <div className="table-wrap"><table>
             <thead>
               <tr>
@@ -1806,13 +1988,90 @@ function Users() {
               </tr>
             </thead>
             <tbody>
-              {list.map((u) => (
+              {sp.pageItems.map((u) => (
                 <UserRow key={u.id} user={u} onChanged={reload} />
               ))}
             </tbody>
           </table></div>
-        )}
-      </section>
+          <Pager page={sp.page} pageCount={sp.pageCount} onPage={sp.setPage} />
+        </>
+      )}
+      {creating && <UserCreateModal onClose={() => setCreating(false)} onCreated={() => { setCreating(false); reload(); }} />}
+    </>
+  );
+}
+
+function UserCreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const [f, setF] = useState({ username: "", password: "", role: "member" as Role, cpuCores: 1, memMB: 512 });
+  const [busy, setBusy] = useState(false);
+  const valid = f.username.trim() !== "" && f.password.length >= 6;
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!valid) return;
+    setBusy(true);
+    const res = await run(
+      api.createUser({
+        username: f.username.trim(),
+        password: f.password,
+        role: f.role,
+        cpuQuotaMilli: Math.round(f.cpuCores * 1000),
+        memQuotaMB: f.memMB,
+      }),
+      { success: `Created ${f.username}` },
+    );
+    setBusy(false);
+    if (res) onCreated();
+  };
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body narrow" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong>
+            <Icon.Users size={15} /> New user
+          </strong>
+          <button type="button" onClick={onClose} aria-label="Close">
+            <Icon.Close size={16} />
+          </button>
+        </div>
+        <form className="form modal-pad" onSubmit={submit}>
+          <label>
+            Username
+            <input autoFocus value={f.username} onChange={(e) => setF({ ...f, username: e.target.value })} />
+          </label>
+          <label>
+            Password
+            <input type="password" value={f.password} placeholder="at least 6 characters" onChange={(e) => setF({ ...f, password: e.target.value })} />
+          </label>
+          <label>
+            Role
+            <select value={f.role} onChange={(e) => setF({ ...f, role: e.target.value as Role })}>
+              <option value="member">member</option>
+              <option value="admin">admin</option>
+            </select>
+          </label>
+          {f.role === "member" && (
+            <div className="row">
+              <label>
+                CPU quota (cores)
+                <input type="number" step="0.1" min="0" value={f.cpuCores} onChange={(e) => setF({ ...f, cpuCores: Number(e.target.value) })} />
+              </label>
+              <label>
+                Memory quota (MB)
+                <input type="number" min="0" value={f.memMB} onChange={(e) => setF({ ...f, memMB: Number(e.target.value) })} />
+              </label>
+            </div>
+          )}
+          <div className="actions" style={{ justifyContent: "flex-end" }}>
+            <button type="button" onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+            <button type="submit" className="primary" disabled={busy || !valid}>
+              {busy ? <Icon.Spinner size={15} /> : <Icon.Plus size={15} />}
+              <span>Create user</span>
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -1821,12 +2080,31 @@ function UserRow({ user, onChanged }: { user: User; onChanged: () => void }) {
   const isAdmin = user.role === "admin";
   const [cpuCores, setCpuCores] = useState(user.cpuQuotaMilli / 1000);
   const [memMB, setMemMB] = useState(user.memQuotaMB);
+  const [pwBusy, pwRun] = useAction();
+  const [roleBusy, roleRun] = useAction();
+  const [envOpen, setEnvOpen] = useState(false);
+
+  const changeRole = (role: Role) =>
+    roleRun(api.setUserRole(user.id, role), { success: `${user.username} is now ${role}` }).then((r) => r !== undefined && onChanged());
+
+  const resetPassword = async () => {
+    const p = window.prompt(`New password for ${user.username} (at least 6 characters):`);
+    if (p === null) return;
+    if (p.length < 6) {
+      toast("error", "Password must be at least 6 characters");
+      return;
+    }
+    await pwRun(api.resetPassword(user.id, p), { success: `Password reset for ${user.username}` });
+  };
 
   return (
     <tr>
       <td className="strong">{user.username}</td>
       <td>
-        <span className={`badge ${isAdmin ? "running" : ""}`}>{user.role}</span>
+        <select className="role-select" value={user.role} disabled={roleBusy} onChange={(e) => changeRole(e.target.value as Role)}>
+          <option value="member">member</option>
+          <option value="admin">admin</option>
+        </select>
       </td>
       <td>
         {isAdmin ? (
@@ -1850,6 +2128,14 @@ function UserRow({ user, onChanged }: { user: User; onChanged: () => void }) {
             onDone={onChanged}
           />
         )}
+        {!isAdmin && (
+          <button type="button" className="btn-icon" title="Assign environments" onClick={() => setEnvOpen(true)}>
+            <Icon.Server size={15} />
+          </button>
+        )}
+        <button type="button" className="btn-icon" title="Reset password" onClick={resetPassword} disabled={pwBusy}>
+          {pwBusy ? <Icon.Spinner size={15} /> : <Icon.Key size={15} />}
+        </button>
         <ActionButton
           icon={Icon.Trash}
           title="Delete user"
@@ -1859,26 +2145,118 @@ function UserRow({ user, onChanged }: { user: User; onChanged: () => void }) {
           task={() => api.deleteUser(user.id)}
           onDone={onChanged}
         />
+        {envOpen && <UserEnvModal user={user} onClose={() => setEnvOpen(false)} />}
       </td>
     </tr>
   );
 }
 
+// UserEnvModal lets an admin grant a member access to remote environments, each
+// with its own CPU/RAM quota.
+type EnvGrantForm = { checked: boolean; cpu: number; mem: number };
+function UserEnvModal({ user, onClose }: { user: User; onClose: () => void }) {
+  const [envs] = useAsync<Endpoint[]>(() => api.endpoints(), []);
+  const [grants, setGrants] = useState<Record<number, EnvGrantForm> | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api.getUserEnvironments(user.id).then((gs) => {
+      const map: Record<number, EnvGrantForm> = {};
+      (gs ?? []).forEach((g) => (map[g.endpointId] = { checked: true, cpu: g.cpuQuotaMilli / 1000, mem: g.memQuotaMB }));
+      setGrants(map);
+    }).catch(() => setGrants({}));
+  }, [user.id]);
+
+  const remotes = (envs ?? []).filter((e) => !e.local);
+  const g = (id: number): EnvGrantForm => grants?.[id] ?? { checked: false, cpu: 1, mem: 512 };
+  const patch = (id: number, p: Partial<EnvGrantForm>) => setGrants((cur) => ({ ...(cur ?? {}), [id]: { ...g(id), ...p } }));
+  const save = async () => {
+    if (!grants) return;
+    setBusy(true);
+    const payload = remotes
+      .filter((e) => grants[e.id]?.checked)
+      .map((e) => ({ endpointId: e.id, cpuQuotaMilli: Math.round(g(e.id).cpu * 1000), memQuotaMB: g(e.id).mem }));
+    const ok = await run(api.setUserEnvironments(user.id, payload), { success: `Updated ${user.username}'s environments` });
+    setBusy(false);
+    if (ok !== undefined) onClose();
+  };
+
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body narrow" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong>
+            <Icon.Server size={15} /> {user.username} · environments
+          </strong>
+          <button type="button" onClick={onClose} aria-label="Close">
+            <Icon.Close size={16} />
+          </button>
+        </div>
+        <div className="modal-pad">
+          <p className="hint">Grant access to remote environments and set a per-environment quota. The local host is always available (its quota is on the Users row).</p>
+          {!grants || !envs ? (
+            <Loading />
+          ) : remotes.length === 0 ? (
+            <p className="muted">No remote environments yet — add one in the Environments tab.</p>
+          ) : (
+            <ul className="check-list">
+              {remotes.map((e) => {
+                const gf = g(e.id);
+                return (
+                  <li key={e.id} className="env-grant">
+                    <label className="check">
+                      <input type="checkbox" checked={gf.checked} onChange={(ev) => patch(e.id, { checked: ev.target.checked })} />
+                      <span className="strong">{e.name}</span>
+                      <span className="muted mono">{e.host}</span>
+                    </label>
+                    {gf.checked && (
+                      <div className="env-grant-quota">
+                        <label>
+                          CPU (cores)
+                          <input type="number" step="0.1" min="0" value={gf.cpu} onChange={(ev) => patch(e.id, { cpu: Number(ev.target.value) })} />
+                        </label>
+                        <label>
+                          Memory (MB)
+                          <input type="number" min="0" value={gf.mem} onChange={(ev) => patch(e.id, { mem: Number(ev.target.value) })} />
+                        </label>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <div className="actions" style={{ justifyContent: "flex-end", marginTop: 14 }}>
+            <button type="button" onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+            <button type="button" className="primary" onClick={save} disabled={busy || !grants}>
+              {busy ? <Icon.Spinner size={15} /> : <Icon.Check2 size={15} />}
+              <span>Save</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () => void }) {
   const [list, err, reload] = useAsync<ResourceRequest[]>(() => api.requests(), []);
-  const [form, setForm] = useState({ cpuCores: 1, memMB: 512, note: "" });
+  const [envs] = useAsync<Endpoint[]>(() => api.endpoints(), []);
+  const [form, setForm] = useState({ endpointId: 0, cpuCores: 1, memMB: 512, note: "" });
   const [busy, setBusy] = useState(false);
+  const envName = (id: number) => (envs ?? []).find((e) => e.id === id)?.name ?? (id === 0 ? "Local" : `env ${id}`);
 
   const fileRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     const res = await run(
-      api.createRequest({ cpuMilli: Math.round(form.cpuCores * 1000), memMB: form.memMB, note: form.note }),
+      api.createRequest({ endpointId: form.endpointId, cpuMilli: Math.round(form.cpuCores * 1000), memMB: form.memMB, note: form.note }),
       { success: "Request submitted" }
     );
     setBusy(false);
     if (res) {
-      setForm({ cpuCores: 1, memMB: 512, note: "" });
+      setForm({ endpointId: 0, cpuCores: 1, memMB: 512, note: "" });
       reload();
     }
   };
@@ -1890,6 +2268,16 @@ function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () =>
           <h3>Request resources</h3>
           <form className="form" onSubmit={fileRequest}>
             <div className="row">
+              <label>
+                Environment
+                <select value={form.endpointId} onChange={(e) => setForm({ ...form, endpointId: Number(e.target.value) })}>
+                  {(envs ?? [{ id: 0, name: "Local" } as Endpoint]).map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <label>
                 CPU (cores)
                 <input type="number" step="0.1" min="0" value={form.cpuCores} onChange={(e) => setForm({ ...form, cpuCores: Number(e.target.value) })} />
@@ -1907,7 +2295,7 @@ function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () =>
               {busy ? <Icon.Spinner size={15} /> : <Icon.Inbox size={15} />}
               <span>Submit request</span>
             </button>
-            <p className="hint">An admin reviews your request. Once approved, the granted CPU/RAM becomes your quota.</p>
+            <p className="hint">An admin reviews your request. Once approved, the granted CPU/RAM becomes your quota on that environment.</p>
           </form>
         </section>
       )}
@@ -1916,7 +2304,7 @@ function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () =>
         <h3>{isAdmin ? "Resource requests" : "My requests"}</h3>
         {err && <Err msg={err} onRetry={reload} />}
         {!list ? (
-          <TableSkeleton cols={5} />
+          <TableSkeleton cols={6} />
         ) : list.length === 0 ? (
           <Empty icon={Icon.Inbox} title="No requests" />
         ) : (
@@ -1924,6 +2312,7 @@ function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () =>
             <thead>
               <tr>
                 {isAdmin && <th>User</th>}
+                <th>Environment</th>
                 <th>Requested</th>
                 <th>Reason</th>
                 <th>Status</th>
@@ -1936,6 +2325,7 @@ function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () =>
                   key={rq.id}
                   rq={rq}
                   isAdmin={isAdmin}
+                  envName={envName(rq.endpointId)}
                   onReviewed={() => {
                     reload();
                     onReviewed();
@@ -1950,11 +2340,16 @@ function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () =>
   );
 }
 
-function RequestRow({ rq, isAdmin, onReviewed }: { rq: ResourceRequest; isAdmin: boolean; onReviewed: () => void }) {
+function RequestRow({ rq, isAdmin, envName, onReviewed }: { rq: ResourceRequest; isAdmin: boolean; envName: string; onReviewed: () => void }) {
   const pending = rq.status === "pending";
   return (
     <tr>
       {isAdmin && <td className="strong">{rq.username}</td>}
+      <td>
+        <span className="badge">
+          <Icon.Server size={12} /> {envName}
+        </span>
+      </td>
       <td className="muted">
         {(rq.cpuMilli / 1000).toFixed(1)} CPU · {rq.memMB} MB
       </td>
@@ -2452,6 +2847,15 @@ function ServiceEditor({
   });
   const [busy, setBusy] = useState(false);
   const [adv, setAdv] = useState<AdvForm>(() => (editing ? advToForm(editing.advanced) : emptyAdvForm()));
+  const [networkNames, setNetworkNames] = useState<string[]>([]);
+  useEffect(() => {
+    if (isMember) return; // networks are admin-only
+    let live = true;
+    api.networks().then((ns) => live && setNetworkNames((ns ?? []).map((n) => n.Name))).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [isMember]);
   const [open, setOpen] = useState<Record<SectionKey, boolean>>({
     basic: true,
     source: true,
@@ -2514,7 +2918,13 @@ function ServiceEditor({
                 <input type="number" value={f.containerPort} onChange={(e) => update({ containerPort: Number(e.target.value) })} />
               </Field>
               <Field label="Network">
-                <input value={f.network} onChange={(e) => update({ network: e.target.value })} />
+                <SearchPicker
+                  value={f.network}
+                  options={networkNames}
+                  onChange={(v) => update({ network: v })}
+                  placeholder="pick or type a network"
+                  icon={Icon.Network}
+                />
               </Field>
             </div>
           </Section>
@@ -2610,7 +3020,7 @@ function ServiceEditor({
             open={open.advanced}
             onToggle={() => toggle("advanced")}
           >
-            <AdvancedPanel form={adv} onChange={setAdv} />
+            <AdvancedPanel form={adv} onChange={setAdv} canPickVolumes={!isMember} />
           </Section>
         </form>
 
@@ -2657,8 +3067,7 @@ const matchVolume = (v: DockerVolume, q: string) => v.name.toLowerCase().include
 function Volumes() {
   const [list, err, reload] = useAsync<DockerVolume[]>(() => api.volumes(), []);
   const [usage, setUsage] = useState<Record<string, { size: number; refCount: number }> | null>(null);
-  const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [browse, setBrowse] = useState<DockerVolume | null>(null);
   const sp = useSearchPage(list ?? [], matchVolume, 12);
 
@@ -2674,36 +3083,29 @@ function Volumes() {
     };
   }, [list]);
 
-  const create = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    const res = await run(api.createVolume(name), { success: `Created volume ${name}` });
-    setBusy(false);
-    if (res !== undefined) {
-      setName("");
-      reload();
-    }
-  };
-
   if (err) return <Err msg={err} onRetry={reload} />;
   if (!list) return <TableSkeleton cols={5} />;
 
   return (
     <>
-      <form className="form inline" onSubmit={create}>
-        <input placeholder="new-volume-name" value={name} onChange={(e) => setName(e.target.value)} />
-        <button type="submit" className="primary" disabled={busy || !name.trim()}>
-          {busy ? <Icon.Spinner size={15} /> : <Icon.Plus size={15} />}
-          <span>Create volume</span>
+      <div className="toolbar">
+        <button type="button" className="primary" onClick={() => setCreating(true)}>
+          <Icon.Plus size={15} /> <span>New volume</span>
         </button>
-        <span className="count">{list.length} volume{list.length === 1 ? "" : "s"}</span>
-      </form>
-
-      {list.length > 0 && (
-        <div className="toolbar">
-          <SearchInput value={sp.query} onChange={sp.setQuery} placeholder="Search volumes…" />
-          <span className="count">{sp.filtered.length} of {list.length}</span>
-        </div>
+        {list.length > 0 && <SearchInput value={sp.query} onChange={sp.setQuery} placeholder="Search volumes…" />}
+        <span className="count">
+          {list.length > 0 ? `${sp.filtered.length} of ${list.length}` : "0"} volume{list.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      {creating && (
+        <NameCreateModal
+          title="New volume"
+          label="Volume name"
+          placeholder="my-volume"
+          hint="Created with the local driver on this host."
+          onCreate={(n) => run(api.createVolume(n), { success: `Created volume ${n}` }).then((r) => (r !== undefined ? (reload(), r) : undefined))}
+          onClose={() => setCreating(false)}
+        />
       )}
 
       {list.length === 0 ? (

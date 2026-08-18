@@ -1,6 +1,7 @@
+import { useEffect, useState } from "react";
 import { Icon } from "./icons";
-import { Field } from "./FormKit";
-import type { AdvancedSpec, PortMap, VolumeMount } from "./api";
+import { Field, SearchPicker } from "./FormKit";
+import { api, type AdvancedSpec, type PortMap, type VolumeMount } from "./api";
 
 // AdvForm is the edit-friendly shape: lists are entered as text (one per line
 // or comma-separated) and converted to the API's AdvancedSpec on submit.
@@ -185,10 +186,31 @@ function Group({ icon: I, title, children }: { readonly icon: (p: { size?: numbe
   );
 }
 
-export function AdvancedPanel({ form, onChange }: { readonly form: AdvForm; readonly onChange: (f: AdvForm) => void }) {
+export function AdvancedPanel({
+  form,
+  onChange,
+  canPickVolumes = true,
+}: {
+  readonly form: AdvForm;
+  readonly onChange: (f: AdvForm) => void;
+  readonly canPickVolumes?: boolean;
+}) {
   const set = <K extends keyof AdvForm>(k: K, v: AdvForm[K]) => onChange({ ...form, [k]: v });
   const upd = (k: "ports" | "mounts", i: number, patch: object) => updateItem(form, onChange, k, i, patch as never);
   const rm = (k: "ports" | "mounts", i: number) => removeItem(form, onChange, k, i);
+
+  // Existing volumes on the selected host, offered as a searchable dropdown for
+  // "volume" mount sources. Volume listing is admin-only, so members skip it
+  // (they type the name) — canPickVolumes is false for them.
+  const [volumes, setVolumes] = useState<string[]>([]);
+  useEffect(() => {
+    if (!canPickVolumes) return;
+    let live = true;
+    api.volumeNames().then((vs) => live && setVolumes(vs ?? [])).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [canPickVolumes]);
 
   return (
     <div className="adv-panel">
@@ -230,12 +252,21 @@ export function AdvancedPanel({ form, onChange }: { readonly form: AdvForm; read
           <span className="adv-sub-label">Volumes & mounts</span>
           {form.mounts.map((m, i) => (
             <div className="adv-row" key={`m${i}`}>
-              <select value={m.type || "bind"} onChange={(e) => upd("mounts", i, { type: e.target.value })}>
-                <option value="bind">bind</option>
+              <select value={m.type || "volume"} onChange={(e) => upd("mounts", i, { type: e.target.value })}>
                 <option value="volume">volume</option>
+                <option value="bind">bind</option>
                 <option value="tmpfs">tmpfs</option>
               </select>
-              <input placeholder={m.type === "tmpfs" ? "(none)" : "source"} value={m.source} disabled={m.type === "tmpfs"} onChange={(e) => upd("mounts", i, { source: e.target.value })} />
+              {m.type === "volume" ? (
+                <SearchPicker value={m.source} options={volumes} onChange={(v) => upd("mounts", i, { source: v })} placeholder="pick or type a volume" icon={Icon.Drive} />
+              ) : (
+                <input
+                  placeholder={m.type === "tmpfs" ? "(none)" : "host path"}
+                  value={m.source}
+                  disabled={m.type === "tmpfs"}
+                  onChange={(e) => upd("mounts", i, { source: e.target.value })}
+                />
+              )}
               <span className="adv-sep">→</span>
               <input placeholder="container path" value={m.target} onChange={(e) => upd("mounts", i, { target: e.target.value })} />
               <label className="adv-check">
@@ -246,7 +277,7 @@ export function AdvancedPanel({ form, onChange }: { readonly form: AdvForm; read
               </button>
             </div>
           ))}
-          <button type="button" className="adv-add" onClick={() => set("mounts", [...form.mounts, { type: "bind", source: "", target: "", readOnly: false }])}>
+          <button type="button" className="adv-add" onClick={() => set("mounts", [...form.mounts, { type: "volume", source: "", target: "", readOnly: false }])}>
             <Icon.Plus size={14} /> <span>Add mount</span>
           </button>
         </div>

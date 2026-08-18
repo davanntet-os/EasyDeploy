@@ -1,5 +1,58 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Icon } from "./icons";
+
+// SearchPicker is an input with a searchable dropdown of suggestions. It still
+// allows typing a value that isn't in the list (e.g. a not-yet-created volume /
+// network). Used for volume mount sources and the service network field.
+export function SearchPicker({
+  value,
+  options,
+  onChange,
+  placeholder,
+  icon: I = Icon.Search,
+}: {
+  value: string;
+  options: string[];
+  onChange: (v: string) => void;
+  placeholder?: string;
+  icon?: (p: { size?: number }) => JSX.Element;
+}) {
+  const [open, setOpen] = useState(false);
+  const q = value.trim().toLowerCase();
+  const matches = options.filter((o) => o.toLowerCase().includes(q));
+  return (
+    <div className="vol-picker">
+      <input
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 120)}
+      />
+      {open && matches.length > 0 && (
+        <ul className="vol-picker-list">
+          {matches.slice(0, 8).map((o) => (
+            <li key={o}>
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  onChange(o);
+                  setOpen(false);
+                }}
+              >
+                <I size={13} /> <span>{o}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 // Section is a collapsible, card-style form group with a completion indicator
 // in its header (a green check once its required fields are satisfied).

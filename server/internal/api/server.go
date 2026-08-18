@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"easydeploy/internal/auth"
@@ -94,6 +95,34 @@ func (s *Server) clientFor(r *http.Request) (*docker.Client, error) {
 	return s.endpoints.ClientFor(r.Context(), endpointID(r))
 }
 
+// requireEndpointAccess blocks a member from targeting an environment they
+// weren't granted. The local host (0) is always allowed; admins bypass. The
+// target comes from the X-Endpoint-Id header / ?endpoint= query (see endpointID).
+func (s *Server) requireEndpointAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := endpointID(r)
+		if id == endpoint.LocalID {
+			next.ServeHTTP(w, r)
+			return
+		}
+		p := auth.Current(r.Context())
+		if p.IsAdmin() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ok, err := s.store.UserHasEndpoint(r.Context(), p.UserID, id)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if !ok {
+			writeErr(w, http.StatusForbidden, errNoEndpointAccess)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // dockerOr502 resolves the target environment's client, writing a 502 and
 // returning ok=false on failure.
 func (s *Server) dockerOr502(w http.ResponseWriter, r *http.Request) (*docker.Client, bool) {
@@ -123,17 +152,23 @@ func (s *Server) Routes() http.Handler {
 		// Everything else requires a valid session token.
 		r.Group(func(r chi.Router) {
 			r.Use(s.auth.Middleware)
+			// A member may only target the local host or an environment
+			// explicitly granted to them; admins may target any.
+			r.Use(s.requireEndpointAccess)
 
 			// Current user + resource requests (any authenticated user).
 			r.Get("/me", s.handleMe)
 			r.Post("/requests", s.handleCreateRequest)
 			r.Get("/requests", s.handleListRequests)
+			// Environments a user may see/switch to (filtered by grants for
+			// members). Management stays admin-only (below).
+			r.Get("/endpoints", s.handleListEndpoints)
+			r.Get("/endpoints/{id}/status", s.handleEndpointStatus)
 
 			// Read-only views available to members and admins. Members see
-			// only their own containers (filtered in the handler).
+			// only their own containers (filtered in the handler). Networks,
+			// volumes, and images are shared infrastructure — admin-only (below).
 			r.Get("/containers", s.handleListContainers)
-			r.Get("/images", s.handleListImages)
-			r.Get("/networks", s.handleListNetworks)
 
 			// Services (load-balanced, autoscaled, git-deployable). Members
 			// manage their own; admins manage all. Ownership is checked in
@@ -168,15 +203,25 @@ func (s *Server) Routes() http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireAdmin)
 
+				// Shared infrastructure — admins only. Members never list
+				// networks, volumes, or images.
+				r.Get("/images", s.handleListImages)
+				r.Get("/networks", s.handleListNetworks)
+				r.Get("/volume-names", s.handleVolumeNames)
+
 				r.Get("/users", s.handleListUsers)
 				r.Post("/users", s.handleCreateUser)
 				r.Put("/users/{id}/quota", s.handleUpdateUserQuota)
+				r.Put("/users/{id}/role", s.handleSetUserRole)
+				r.Put("/users/{id}/password", s.handleResetPassword)
+				r.Get("/users/{id}/environments", s.handleGetUserEnvironments)
+				r.Put("/users/{id}/environments", s.handleSetUserEnvironments)
 				r.Delete("/users/{id}", s.handleDeleteUser)
 
-				// Environments (multi-host, Portainer-style).
-				r.Get("/endpoints", s.handleListEndpoints)
+				// Environments (multi-host, Portainer-style). List + status are
+				// in the shared group above; management is admin-only.
 				r.Post("/endpoints", s.handleCreateEndpoint)
-				r.Get("/endpoints/{id}/status", s.handleEndpointStatus)
+				r.Put("/endpoints/{id}", s.handleUpdateEndpoint)
 				r.Delete("/endpoints/{id}", s.handleDeleteEndpoint)
 				// Edge proxy: an Envoy on a remote host, driven by this xDS, so
 				// Routes/Services work on that environment.
@@ -242,9 +287,18 @@ func (s *Server) mountSPA(r chi.Router) {
 	r.Handle("/*", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		path := filepath.Join(s.cfg.WebDir, filepath.Clean(req.URL.Path))
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			// Vite fingerprints /assets/* by content hash, so they can be cached
+			// forever; everything else (index.html especially) must revalidate
+			// so a new build is picked up without a hard refresh.
+			if strings.HasPrefix(req.URL.Path, "/assets/") {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			} else {
+				w.Header().Set("Cache-Control", "no-cache")
+			}
 			fs.ServeHTTP(w, req)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFile(w, req, index)
 	}))
 }

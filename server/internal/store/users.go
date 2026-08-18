@@ -48,6 +48,7 @@ type ResourceRequest struct {
 	ID         int64         `json:"id"`
 	UserID     int64         `json:"userId"`
 	Username   string        `json:"username"`
+	EndpointID int64         `json:"endpointId"` // which environment the quota is for (0 = local)
 	CPUMilli   int           `json:"cpuMilli"`
 	MemMB      int           `json:"memMB"`
 	Note       string        `json:"note"`
@@ -125,6 +126,26 @@ func (s *Store) UpdateUserQuota(ctx context.Context, id int64, cpuMilli, memMB i
 	return err
 }
 
+// SetUserPassword updates an account's password hash.
+func (s *Store) SetUserPassword(ctx context.Context, id int64, passwordHash string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, passwordHash, id)
+	return err
+}
+
+// SetUserRole updates an account's role (admin/member).
+func (s *Store) SetUserRole(ctx context.Context, id int64, role Role) error {
+	_, err := s.pool.Exec(ctx, `UPDATE users SET role = $1 WHERE id = $2`, role, id)
+	return err
+}
+
+// CountAdmins returns the number of admin accounts (to guard against removing
+// the last one).
+func (s *Store) CountAdmins(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE role = 'admin'`).Scan(&n)
+	return n, err
+}
+
 // DeleteUser removes an account.
 func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
@@ -136,10 +157,10 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 // CreateRequest files a new pending resource request.
 func (s *Store) CreateRequest(ctx context.Context, r ResourceRequest) (ResourceRequest, error) {
 	err := s.pool.QueryRow(ctx, `
-INSERT INTO resource_requests (user_id, username, cpu_milli, mem_mb, note, status)
-VALUES ($1, $2, $3, $4, $5, 'pending')
+INSERT INTO resource_requests (user_id, username, endpoint_id, cpu_milli, mem_mb, note, status)
+VALUES ($1, $2, $3, $4, $5, $6, 'pending')
 RETURNING id, created_at`,
-		r.UserID, r.Username, r.CPUMilli, r.MemMB, r.Note).Scan(&r.ID, &r.CreatedAt)
+		r.UserID, r.Username, r.EndpointID, r.CPUMilli, r.MemMB, r.Note).Scan(&r.ID, &r.CreatedAt)
 	if err != nil {
 		return ResourceRequest{}, err
 	}
@@ -147,11 +168,11 @@ RETURNING id, created_at`,
 	return r, nil
 }
 
-const reqCols = `id, user_id, username, cpu_milli, mem_mb, note, status, reviewed_by, review_note, created_at, reviewed_at`
+const reqCols = `id, user_id, username, endpoint_id, cpu_milli, mem_mb, note, status, reviewed_by, review_note, created_at, reviewed_at`
 
 func scanRequest(row pgx.Row) (ResourceRequest, error) {
 	var r ResourceRequest
-	err := row.Scan(&r.ID, &r.UserID, &r.Username, &r.CPUMilli, &r.MemMB, &r.Note, &r.Status, &r.ReviewedBy, &r.ReviewNote, &r.CreatedAt, &r.ReviewedAt)
+	err := row.Scan(&r.ID, &r.UserID, &r.Username, &r.EndpointID, &r.CPUMilli, &r.MemMB, &r.Note, &r.Status, &r.ReviewedBy, &r.ReviewNote, &r.CreatedAt, &r.ReviewedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ResourceRequest{}, ErrNotFound
 	}

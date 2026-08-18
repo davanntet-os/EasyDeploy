@@ -140,6 +140,71 @@ func (s *Server) handleUpdateUserQuota(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
+// handleSetUserRole changes a user's role. It refuses to demote the last admin
+// so the instance can't be locked out.
+func (s *Server) handleSetUserRole(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var req struct {
+		Role string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	role := store.Role(req.Role)
+	if role != store.RoleAdmin && role != store.RoleMember {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("role must be admin or member"))
+		return
+	}
+	if role == store.RoleMember {
+		if u, err := s.store.GetUserByID(r.Context(), id); err == nil && u.Role == store.RoleAdmin {
+			if n, err := s.store.CountAdmins(r.Context()); err == nil && n <= 1 {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("cannot demote the last admin"))
+				return
+			}
+		}
+	}
+	if err := s.store.SetUserRole(r.Context(), id, role); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// handleResetPassword sets a new password for a user (admin only).
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.Password) < 6 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("password must be at least 6 characters"))
+		return
+	}
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.store.SetUserPassword(r.Context(), id, hash); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -163,9 +228,10 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 	p := auth.Current(r.Context())
 	var req struct {
-		CPUMilli int    `json:"cpuMilli"`
-		MemMB    int    `json:"memMB"`
-		Note     string `json:"note"`
+		EndpointID int64  `json:"endpointId"`
+		CPUMilli   int    `json:"cpuMilli"`
+		MemMB      int    `json:"memMB"`
+		Note       string `json:"note"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -175,12 +241,26 @@ func (s *Server) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("cpu and memory must be positive"))
 		return
 	}
+	// A member may only request quota for the local host or an environment they
+	// already have access to (access itself is granted by an admin).
+	if req.EndpointID != 0 && !p.IsAdmin() {
+		ok, err := s.store.UserHasEndpoint(r.Context(), p.UserID, req.EndpointID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if !ok {
+			writeErr(w, http.StatusForbidden, fmt.Errorf("you don't have access to that environment"))
+			return
+		}
+	}
 	created, err := s.store.CreateRequest(r.Context(), store.ResourceRequest{
-		UserID:   p.UserID,
-		Username: p.Username,
-		CPUMilli: req.CPUMilli,
-		MemMB:    req.MemMB,
-		Note:     req.Note,
+		UserID:     p.UserID,
+		Username:   p.Username,
+		EndpointID: req.EndpointID,
+		CPUMilli:   req.CPUMilli,
+		MemMB:      req.MemMB,
+		Note:       req.Note,
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -246,7 +326,15 @@ func (s *Server) handleReviewRequest(w http.ResponseWriter, r *http.Request) {
 	if grantMem <= 0 {
 		grantMem = rr.MemMB
 	}
-	if err := s.store.UpdateUserQuota(r.Context(), rr.UserID, grantCPU, grantMem); err != nil {
+	// Grant the quota on the environment the request targeted: the local host
+	// writes the user's base quota; a remote grants (or updates) the per-env
+	// quota, which also grants access to that host.
+	if rr.EndpointID == 0 {
+		err = s.store.UpdateUserQuota(r.Context(), rr.UserID, grantCPU, grantMem)
+	} else {
+		err = s.store.GrantUserEndpointQuota(r.Context(), rr.UserID, rr.EndpointID, grantCPU, grantMem)
+	}
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}

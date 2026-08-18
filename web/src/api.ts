@@ -191,6 +191,7 @@ export interface ResourceRequest {
   id: number;
   userId: number;
   username: string;
+  endpointId: number; // which environment the quota is for (0 = local)
   cpuMilli: number;
   memMB: number;
   note: string;
@@ -199,6 +200,13 @@ export interface ResourceRequest {
   reviewNote: string;
   createdAt: string;
   reviewedAt: string | null;
+}
+
+// EndpointGrant is a user's access to a remote environment plus its quota.
+export interface EndpointGrant {
+  endpointId: number;
+  cpuQuotaMilli: number;
+  memQuotaMB: number;
 }
 
 // --- token management ---
@@ -339,6 +347,12 @@ export const api = {
     req<User>("/users", { method: "POST", body: JSON.stringify(u) }),
   updateUserQuota: (id: number, cpuQuotaMilli: number, memQuotaMB: number) =>
     req(`/users/${id}/quota`, { method: "PUT", body: JSON.stringify({ cpuQuotaMilli, memQuotaMB }) }),
+  setUserRole: (id: number, role: Role) => req(`/users/${id}/role`, { method: "PUT", body: JSON.stringify({ role }) }),
+  getUserEnvironments: (id: number) => req<EndpointGrant[]>(`/users/${id}/environments`),
+  setUserEnvironments: (id: number, grants: EndpointGrant[]) =>
+    req(`/users/${id}/environments`, { method: "PUT", body: JSON.stringify({ grants }) }),
+  resetPassword: (id: number, password: string) =>
+    req(`/users/${id}/password`, { method: "PUT", body: JSON.stringify({ password }) }),
   deleteUser: (id: number) => req(`/users/${id}`, { method: "DELETE" }),
 
   services: () => req<Service[]>("/services"),
@@ -354,7 +368,7 @@ export const api = {
   deleteService: (name: string) => req(`/services/${name}`, { method: "DELETE" }),
 
   requests: (status?: string) => req<ResourceRequest[]>(`/requests${status ? `?status=${status}` : ""}`),
-  createRequest: (r: { cpuMilli: number; memMB: number; note: string }) =>
+  createRequest: (r: { endpointId: number; cpuMilli: number; memMB: number; note: string }) =>
     req<ResourceRequest>("/requests", { method: "POST", body: JSON.stringify(r) }),
   reviewRequest: (id: number, body: { approve: boolean; grantCpuMilli?: number; grantMemMB?: number; note?: string }) =>
     req(`/requests/${id}/review`, { method: "POST", body: JSON.stringify(body) }),
@@ -381,6 +395,8 @@ export const api = {
   endpoints: () => req<Endpoint[]>("/endpoints"),
   createEndpoint: (b: { name: string; host: string; tlsCa?: string; tlsCert?: string; tlsKey?: string }) =>
     req<Endpoint>("/endpoints", { method: "POST", body: JSON.stringify(b) }),
+  updateEndpoint: (id: number, b: { name: string; host: string; tlsCa?: string; tlsCert?: string; tlsKey?: string }) =>
+    req<Endpoint>(`/endpoints/${id}`, { method: "PUT", body: JSON.stringify(b) }),
   endpointStatus: (id: number) => req<{ ok: boolean; version: string }>(`/endpoints/${id}/status`),
   deleteEndpoint: (id: number) => req(`/endpoints/${id}`, { method: "DELETE" }),
   // Edge proxy: an Envoy on a remote host so Routes/Services work there.
@@ -390,6 +406,9 @@ export const api = {
   removeEdge: (id: number) => req(`/endpoints/${id}/edge`, { method: "DELETE" }),
 
   volumes: () => req<DockerVolume[]>("/volumes"),
+  // Volume names only — available to any authenticated user (the full volume
+  // manager is admin-only), for the service form's mount-source picker.
+  volumeNames: () => req<string[]>("/volume-names"),
   volumeUsage: () => req<Record<string, { size: number; refCount: number }>>("/volumes/usage"),
   createVolume: (name: string, driver = "local") =>
     req("/volumes", { method: "POST", body: JSON.stringify({ name, driver }) }),

@@ -218,11 +218,35 @@ migrate the `docker` package's type names deliberately.
   can't set an Authorization header, so the middleware also accepts `?token=`.
 - **Members are quota-bound; admins are not.** The three-tier route groups in
   `api/server.go` are: (1) any authenticated user — `/me`, `/requests`,
-  read-only lists, `/services` (create/scale/redeploy/delete their own);
+  `/containers` (own only), `/services` (create/scale/redeploy/delete their own);
   (2) container-scoped actions wrapped by
   `requireContainerOwner` (members may only touch containers labeled
   `easydeploy.owner=<them>`; admins bypass); (3) `RequireAdmin` for everything
   else. `handleListContainers` also filters to owned containers for members.
+- **Per-user environment access + per-environment quota (multi-tenancy).** An
+  admin grants a member specific remote environments, **each with its own
+  CPU/RAM quota**, via `PUT /users/{id}/environments` (`user_endpoints` table:
+  `(user_id, endpoint_id, cpu_quota_milli, mem_quota_mb)`; local host 0 is always
+  allowed with the user's base quota, admins get all). The `requireEndpointAccess`
+  middleware (whole authenticated tree) enforces access: a member's
+  `X-Endpoint-Id`/`?endpoint=` must be 0 or a granted id, else 403. `GET
+  /endpoints` is member-visible but **filtered to granted hosts**; the
+  `EnvSwitcher` (shown to everyone, `canManage` gates add/remove) lists only
+  those. **Quota is per environment**: `enforceServiceQuota` reads the target
+  env's quota (local → `users`; remote → `user_endpoints`) and counts usage on
+  that host (`clientFor(r)`). **Resource requests carry `endpoint_id`** — a member
+  requests quota *for a specific environment they can access* (`Requests` form has
+  an env selector), and approval grants that env's quota (`UpdateUserQuota` for
+  local, `GrantUserEndpointQuota` for a remote — which also grants access). Admin
+  assigns access + per-env quota directly via the Users tab (server-icon →
+  `UserEnvModal`).
+- **Networks, volumes, and images are admin-only.** They're shared
+  infrastructure, so their list endpoints (`/networks`, `/volumes`,
+  `/volume-names`, `/images`) live in the `RequireAdmin` group — a member never
+  sees another tenant's infra. The frontend gates member fetches accordingly
+  (Overview tiles, and the service form's network/volume pickers are empty for
+  members, who type names by hand). `PUT /users/{id}/password` (admin) resets a
+  password (`store.SetUserPassword`, bcrypt).
 - **The resource-request / quota workflow** is the headline member flow:
   a member with no quota cannot deploy (`resolveResources` returns 403). They
   `POST /requests` (CPU millicores + MB); an admin approves via
@@ -295,6 +319,12 @@ three advanced features and threads through the proxy just like a manual route:
   add the field to `AdvancedSpec`, map it in `applyAdvanced`, and add a control
   to `web/src/ServiceAdvanced.tsx` (the form uses an edit-friendly `AdvForm`
   that `buildAdvanced` converts to the API shape).
+  - A **volume mount source** uses a searchable `VolumePicker` dropdown of
+    existing volumes, fed by `GET /api/volume-names` — a lightweight names-only
+    list in the **non-admin** route group (the full volume manager stays
+    admin-only) so members creating a service can pick a volume too. Bind
+    sources stay free-text (host paths); you can still type a volume that
+    doesn't exist yet (Docker creates it).
   - **Published host ports are offset per replica** (`offsetHostPorts` in
     `service.go`): a fixed host port can bind only one container, so replica *i*
     gets `hostPort+i` (base → replica 0, base+1 → replica 1, …). Without this the
@@ -352,6 +382,18 @@ monotonic seed keeps versions increasing across restarts.
   computes CPU% (cpu/system delta × online CPUs), memory used-vs-limit, and
   network rates client-side, rendered as threshold-colored meters + single-hue
   sparklines. No new backend endpoint — it's a consumer of `/stats`.
+- **Environments tab** (`Environments` in `App.tsx`, admin-only): the dedicated
+  multi-host management view — a card per Docker host with live status + Docker
+  version (`endpointStatus`), connection type, switch-to, **edit**
+  (`PUT /endpoints/{id}` → `endpoint.Manager.Update`; blank TLS certs preserve
+  the stored ones, cached client is dropped), remove, and (for
+  remotes) the **edge proxy** deploy/redeploy/remove (`edgeStatus`/`deployEdge`).
+  It probes the edge only on a *reachable* remote (the inspect-over-SSH is
+  unbounded and would hang on a dead host). The top-right `EnvSwitcher` stays for
+  quick switching. Users tab: `New user` popup (`UserCreateModal`), search +
+  pagination (`useSearchPage`), inline quota edit, an editable **role** select
+  (`PUT /users/{id}/role`, guarded so the **last admin can't be demoted**), and a
+  key-icon reset-password per row.
 - **Service detail** (`ServiceDetail` in `App.tsx`): clicking a service card's
   header opens a topology view — **domains → load balancer (Envoy round-robin) →
   replica containers** — plus a config grid. It fetches `api.containers()` to
