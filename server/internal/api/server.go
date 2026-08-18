@@ -1,0 +1,262 @@
+// Package api exposes EasyDeploy's REST + WebSocket surface and wires the
+// HTTP router to the docker, proxy, and tunnel subsystems.
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"easydeploy/internal/auth"
+	"easydeploy/internal/config"
+	"easydeploy/internal/docker"
+	"easydeploy/internal/endpoint"
+	"easydeploy/internal/proxy"
+	"easydeploy/internal/registry"
+	"easydeploy/internal/service"
+	"easydeploy/internal/store"
+	"easydeploy/internal/tunnel"
+	"easydeploy/internal/xds"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gorilla/websocket"
+)
+
+// Deps bundles the server's dependencies.
+type Deps struct {
+	Cfg        config.Config
+	Docker     *docker.Client // the local host client
+	Registry   *proxy.Registry
+	Tunnels    *tunnel.Manager
+	Store      *store.Store
+	Auth       *auth.Manager
+	Registries *registry.Service
+	Services   *service.Manager
+	Endpoints  *endpoint.Manager
+	XDS        *xds.Manager
+}
+
+// Server holds the dependencies shared by all HTTP handlers.
+type Server struct {
+	cfg        config.Config
+	docker     *docker.Client // local host (services, quota, proxy sync)
+	registry   *proxy.Registry
+	tunnels    *tunnel.Manager
+	store      *store.Store
+	auth       *auth.Manager
+	registries *registry.Service
+	services   *service.Manager
+	endpoints  *endpoint.Manager
+	xds        *xds.Manager
+	upgrader   websocket.Upgrader
+}
+
+// NewServer constructs the API server.
+func NewServer(d Deps) *Server {
+	return &Server{
+		cfg:        d.Cfg,
+		docker:     d.Docker,
+		registry:   d.Registry,
+		tunnels:    d.Tunnels,
+		store:      d.Store,
+		auth:       d.Auth,
+		registries: d.Registries,
+		services:   d.Services,
+		endpoints:  d.Endpoints,
+		xds:        d.XDS,
+		upgrader: websocket.Upgrader{
+			// Dev default: accept any origin. Tighten for production.
+			CheckOrigin: func(*http.Request) bool { return true },
+		},
+	}
+}
+
+// endpointID reads the target environment id from the request (header or
+// query). Empty / "local" means the local host.
+func endpointID(r *http.Request) int64 {
+	v := r.Header.Get("X-Endpoint-Id")
+	if v == "" {
+		v = r.URL.Query().Get("endpoint")
+	}
+	if v == "" || v == "local" {
+		return endpoint.LocalID
+	}
+	id, _ := strconv.ParseInt(v, 10, 64)
+	return id
+}
+
+// clientFor resolves the docker client for the request's target environment.
+func (s *Server) clientFor(r *http.Request) (*docker.Client, error) {
+	return s.endpoints.ClientFor(r.Context(), endpointID(r))
+}
+
+// dockerOr502 resolves the target environment's client, writing a 502 and
+// returning ok=false on failure.
+func (s *Server) dockerOr502(w http.ResponseWriter, r *http.Request) (*docker.Client, bool) {
+	cli, err := s.clientFor(r)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return nil, false
+	}
+	return cli, true
+}
+
+// Routes builds the HTTP handler tree.
+func (s *Server) Routes() http.Handler {
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.Timeout(60 * time.Second))
+
+	r.Route("/api", func(r chi.Router) {
+		// Public endpoints.
+		r.Get("/health", s.handleHealth)
+		r.Post("/auth/login", s.handleLogin)
+		// Git webhook: authenticated by an unguessable per-service token in
+		// the path, so it lives outside the JWT middleware.
+		r.Post("/hooks/{token}", s.handleWebhook)
+
+		// Everything else requires a valid session token.
+		r.Group(func(r chi.Router) {
+			r.Use(s.auth.Middleware)
+
+			// Current user + resource requests (any authenticated user).
+			r.Get("/me", s.handleMe)
+			r.Post("/requests", s.handleCreateRequest)
+			r.Get("/requests", s.handleListRequests)
+
+			// Read-only views available to members and admins. Members see
+			// only their own containers (filtered in the handler).
+			r.Get("/containers", s.handleListContainers)
+			r.Get("/images", s.handleListImages)
+			r.Get("/networks", s.handleListNetworks)
+
+			// Services (load-balanced, autoscaled, git-deployable). Members
+			// manage their own; admins manage all. Ownership is checked in
+			// the handlers.
+			r.Get("/services", s.handleListServices)
+			r.Post("/services", s.handleCreateService)
+			r.Get("/services/{name}", s.handleGetService)
+			r.Put("/services/{name}", s.handleUpdateService)
+			r.Post("/services/{name}/scale", s.handleScaleService)
+			r.Post("/services/{name}/redeploy", s.handleRedeployService)
+			r.Post("/services/{name}/subdomain", s.handleSetServiceSubdomain)
+			r.Delete("/services/{name}", s.handleDeleteService)
+
+			// Container-scoped actions. For members the ownership middleware
+			// restricts these to containers they own; admins bypass it.
+			r.Group(func(r chi.Router) {
+				r.Use(s.requireContainerOwner)
+				r.Get("/containers/{id}", s.handleInspectContainer)
+				r.Post("/containers/{id}/start", s.handleContainerAction((*docker.Client).Start))
+				r.Post("/containers/{id}/stop", s.handleContainerAction((*docker.Client).Stop))
+				r.Post("/containers/{id}/restart", s.handleContainerAction((*docker.Client).Restart))
+				r.Put("/containers/{id}", s.handleEditContainer)
+				r.Post("/containers/{id}/update", s.handleUpdateContainer)
+				r.Delete("/containers/{id}", s.handleContainerAction((*docker.Client).Remove))
+				r.Get("/containers/{id}/logs", s.handleLogs)   // WebSocket
+				r.Get("/containers/{id}/stats", s.handleStats) // WebSocket
+				r.Get("/containers/{id}/exec", s.handleExec)   // WebSocket (shell)
+			})
+
+			// Admin-only: user management, request review, and all
+			// infrastructure (networks, routes, registries, tunnels, volumes).
+			r.Group(func(r chi.Router) {
+				r.Use(auth.RequireAdmin)
+
+				r.Get("/users", s.handleListUsers)
+				r.Post("/users", s.handleCreateUser)
+				r.Put("/users/{id}/quota", s.handleUpdateUserQuota)
+				r.Delete("/users/{id}", s.handleDeleteUser)
+
+				// Environments (multi-host, Portainer-style).
+				r.Get("/endpoints", s.handleListEndpoints)
+				r.Post("/endpoints", s.handleCreateEndpoint)
+				r.Get("/endpoints/{id}/status", s.handleEndpointStatus)
+				r.Delete("/endpoints/{id}", s.handleDeleteEndpoint)
+				// Edge proxy: an Envoy on a remote host, driven by this xDS, so
+				// Routes/Services work on that environment.
+				r.Get("/endpoints/{id}/edge", s.handleEdgeStatus)
+				r.Post("/endpoints/{id}/edge", s.handleDeployEdge)
+				r.Delete("/endpoints/{id}/edge", s.handleRemoveEdge)
+
+				r.Post("/requests/{id}/review", s.handleReviewRequest)
+
+				r.Delete("/images/{id}", s.handleRemoveImage)
+
+				r.Get("/volumes", s.handleListVolumes)
+				r.Get("/volumes/usage", s.handleVolumeUsage)
+				r.Post("/volumes", s.handleCreateVolume)
+				r.Get("/volumes/{name}", s.handleInspectVolume)
+				r.Get("/volumes/{name}/browse", s.handleBrowseVolume)
+				r.Post("/volumes/{name}/mkdir", s.handleMkdirVolume)
+				r.Post("/volumes/{name}/upload", s.handleUploadVolume)
+				r.Get("/volumes/{name}/download", s.handleDownloadVolume)
+				r.Delete("/volumes/{name}/file", s.handleDeleteVolumeFile)
+				r.Delete("/volumes/{name}", s.handleRemoveVolume)
+
+				r.Post("/networks", s.handleCreateNetwork)
+				r.Get("/networks/{id}", s.handleInspectNetwork)
+				r.Delete("/networks/{id}", s.handleRemoveNetwork)
+				r.Post("/networks/{id}/connect", s.handleConnectNetwork)
+				r.Post("/networks/{id}/disconnect", s.handleDisconnectNetwork)
+
+				r.Get("/routes", s.handleListRoutes)
+				r.Post("/routes", s.handleUpsertRoute)
+				r.Delete("/routes/{subdomain}", s.handleDeleteRoute)
+
+				r.Get("/registries", s.handleListRegistries)
+				r.Post("/registries", s.handleCreateRegistry)
+				r.Post("/registries/test", s.handleTestRegistry)
+				r.Delete("/registries/{id}", s.handleDeleteRegistry)
+				r.Get("/registries/{id}/catalog", s.handleRegistryCatalog)
+				r.Get("/registries/{id}/tags", s.handleRegistryTags)
+
+				r.Get("/public-ip", s.handlePublicIP)
+				r.Get("/tunnels", s.handleListTunnels)
+				r.Post("/tunnels", s.handleCreateTunnel)
+				r.Post("/tunnels/{id}/start", s.handleStartTunnel)
+				r.Post("/tunnels/{id}/stop", s.handleStopTunnel)
+				r.Delete("/tunnels/{id}", s.handleDeleteTunnel)
+			})
+		})
+	})
+
+	// Serve the built single-page app when a web directory is configured.
+	// Unknown non-API paths fall back to index.html so client-side routing
+	// works.
+	if s.cfg.WebDir != "" {
+		s.mountSPA(r)
+	}
+	return r
+}
+
+// mountSPA serves static assets from cfg.WebDir with an index.html fallback.
+func (s *Server) mountSPA(r chi.Router) {
+	fs := http.FileServer(http.Dir(s.cfg.WebDir))
+	index := filepath.Join(s.cfg.WebDir, "index.html")
+	r.Handle("/*", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		path := filepath.Join(s.cfg.WebDir, filepath.Clean(req.URL.Path))
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			fs.ServeHTTP(w, req)
+			return
+		}
+		http.ServeFile(w, req, index)
+	}))
+}
+
+// --- helpers ---
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, status int, err error) {
+	writeJSON(w, status, map[string]string{"error": err.Error()})
+}

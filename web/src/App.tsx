@@ -1,0 +1,2960 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  api,
+  auth,
+  environment,
+  setUnauthorizedHandler,
+  wsURL,
+  type Container,
+  type ContainerInspect,
+  type Route,
+  type Tunnel,
+  type DeployRequest,
+  type Registry,
+  type DockerNetwork,
+  type DockerVolume,
+  type VolFile,
+  type Endpoint,
+  type EdgeStatus,
+  type Me,
+  type User,
+  type ResourceRequest,
+  type Role,
+  type Service,
+  type ServiceRequest,
+} from "./api";
+import { readRoute, setRouteTab, onRouteChange } from "./route";
+import { Icon } from "./icons";
+import { ActivityBar, Toaster, toast, run, useAction } from "./ui";
+import { Shell } from "./Terminal";
+import { Monitor } from "./Monitor";
+import { AdvancedPanel, emptyAdvForm, buildAdvanced, advToForm, type AdvForm } from "./ServiceAdvanced";
+import { Section, Field, SourceSelector } from "./FormKit";
+
+type Tab =
+  | "overview"
+  | "containers"
+  | "services"
+  | "networks"
+  | "volumes"
+  | "routes"
+  | "registries"
+  | "expose"
+  | "users"
+  | "requests";
+
+const TAB_META: Record<Tab, { icon: (p: { size?: number }) => JSX.Element; label: string }> = {
+  overview: { icon: Icon.Gauge, label: "Overview" },
+  containers: { icon: Icon.Box, label: "Containers" },
+  services: { icon: Icon.Layers, label: "Services" },
+  networks: { icon: Icon.Network, label: "Networks" },
+  volumes: { icon: Icon.Drive, label: "Volumes" },
+  routes: { icon: Icon.Route, label: "Routes" },
+  registries: { icon: Icon.Registry, label: "Registries" },
+  expose: { icon: Icon.Globe, label: "Expose" },
+  users: { icon: Icon.Users, label: "Users" },
+  requests: { icon: Icon.Inbox, label: "Requests" },
+};
+
+// Tabs visible per role. Members get a reduced surface centered on their
+// services and resource requests.
+const ADMIN_TABS: Tab[] = ["overview", "containers", "services", "networks", "volumes", "routes", "registries", "expose", "users", "requests"];
+const MEMBER_TABS: Tab[] = ["overview", "containers", "services", "requests"];
+
+export function App() {
+  const [authed, setAuthed] = useState<boolean>(!!auth.get());
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => setAuthed(false));
+  }, []);
+
+  if (!authed) return <Login onLogin={() => setAuthed(true)} />;
+  return <Dashboard onLogout={() => { auth.clear(); setAuthed(false); }} />;
+}
+
+function Login({ onLogin }: { onLogin: () => void }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr("");
+    try {
+      const { token } = await api.login(username, password);
+      auth.set(token);
+      onLogin();
+    } catch (e) {
+      setErr(String((e as Error).message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="login">
+      <form className="login-card" onSubmit={submit}>
+        <span className="brand-mark login-mark">
+          <Icon.Rocket size={22} />
+        </span>
+        <h1>EasyDeploy</h1>
+        <p className="muted">Sign in to manage your containers.</p>
+        <input
+          autoFocus
+          placeholder="Username"
+          autoComplete="username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+        <input
+          type="password"
+          placeholder="Password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        {err && <p className="error">{err}</p>}
+        <button type="submit" className="primary" disabled={busy}>
+          {busy ? <Icon.Spinner size={15} /> : null}
+          <span>{busy ? "Signing in…" : "Sign in"}</span>
+        </button>
+      </form>
+    </div>
+  );
+}
+
+// Tabs that only make sense on the local host. Services and Routes now work on
+// remote hosts too (via a per-host edge Envoy), so only public Expose — which
+// depends on the local host's own network/tunnel — stays local-only.
+const LOCAL_ONLY_TABS: Tab[] = ["expose"];
+
+// isTab narrows an arbitrary URL fragment to a known tab.
+const isTab = (s: string): s is Tab => (ADMIN_TABS as string[]).includes(s);
+
+function Dashboard({ onLogout }: { onLogout: () => void }) {
+  const [tab, setTab] = useState<Tab>(() => {
+    const t = readRoute().tab;
+    return isTab(t) ? t : "overview";
+  });
+  const [health, setHealth] = useState<{ ok: boolean; dockerError: string } | null>(null);
+  const [healthNonce, setHealthNonce] = useState(0);
+  const [me, setMe] = useState<Me | null>(null);
+  const [drawer, setDrawer] = useState(false);
+  const [envId, setEnvId] = useState(environment.get());
+
+  const refreshMe = () => api.me().then(setMe).catch(() => {});
+  useEffect(() => {
+    refreshMe();
+    const offEnv = environment.subscribe(() => setEnvId(environment.get()));
+    // Follow the URL on back/forward navigation or a pasted/edited link.
+    const offRoute = onRouteChange(() => {
+      const t = readRoute().tab;
+      if (isTab(t)) setTab(t);
+    });
+    return () => {
+      offEnv();
+      offRoute();
+    };
+  }, []);
+
+  // Health reflects the *selected* environment: the local daemon (/health) or a
+  // remote host's reachability (endpointStatus). Re-checked when the env changes
+  // so a dead remote host is caught before every list request hangs on it.
+  useEffect(() => {
+    let live = true;
+    setHealth(null);
+    const check =
+      envId === 0
+        ? api.health()
+        : api.endpointStatus(envId).then((s) => ({ ok: s.ok, dockerError: s.ok ? "" : "unreachable" }));
+    check.then((h) => live && setHealth(h)).catch(() => live && setHealth({ ok: false, dockerError: "unreachable" }));
+    return () => {
+      live = false;
+    };
+  }, [envId, healthNonce]);
+
+  const isAdmin = me?.role === "admin";
+  const onLocal = envId === 0;
+  // A selected remote environment that isn't responding — don't drown the user
+  // in perpetual skeletons; show a clear switch-to-local panel instead.
+  const envDown = !onLocal && health !== null && !health.ok;
+  let tabs = isAdmin ? ADMIN_TABS : MEMBER_TABS;
+  if (!onLocal) tabs = tabs.filter((t) => !LOCAL_ONLY_TABS.includes(t));
+  // Keep the active tab valid for the role and environment.
+  const activeTab = tabs.includes(tab) ? tab : "containers";
+  // Normalize the URL when the requested tab isn't valid here (wrong role /
+  // remote-hidden tab), so a refresh lands on the same resolved tab.
+  useEffect(() => {
+    if (readRoute().tab !== activeTab) setRouteTab(activeTab, true);
+  }, [activeTab]);
+  const go = (t: Tab) => {
+    setTab(t);
+    setRouteTab(t); // reflect into the URL (adds a history entry)
+    setDrawer(false); // close the mobile drawer on navigation
+  };
+
+  return (
+    <div className={`shell ${drawer ? "drawer-open" : ""}`}>
+      <ActivityBar />
+      <Toaster />
+
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-mark">
+            <Icon.Rocket size={18} />
+          </span>
+          <h1>EasyDeploy</h1>
+        </div>
+        <nav className="side-nav">
+          {tabs.map((t) => {
+            const M = TAB_META[t];
+            return (
+              <button key={t} className={activeTab === t ? "active" : ""} onClick={() => go(t)}>
+                <M.icon size={17} />
+                <span>{M.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+        <div className="side-foot">
+          <div className={`health-chip ${health ? (health.ok ? "ok" : "bad") : ""}`} title={health?.ok ? "Docker daemon reachable" : health?.dockerError || "Checking connection…"}>
+            <span className={`dot ${health ? (health.ok ? "ok" : "bad") : "pending"}`} />
+            <span className="health-text">
+              <span className="health-title">{health ? (health.ok ? "Connected" : "Disconnected") : "Connecting…"}</span>
+              <span className="health-sub">{onLocal ? "Local Docker host" : "Remote environment"}</span>
+            </span>
+          </div>
+        </div>
+      </aside>
+
+      <div className="main-col">
+        <header className="topbar">
+          <button className="menu-btn btn-icon" onClick={() => setDrawer((v) => !v)} aria-label="Menu">
+            <Icon.Menu size={18} />
+          </button>
+          <h2 className="page-title">
+            {(() => {
+              const M = TAB_META[activeTab];
+              return (
+                <>
+                  <M.icon size={17} />
+                  <span>{M.label}</span>
+                </>
+              );
+            })()}
+          </h2>
+          <div className="topbar-right">
+            {isAdmin && <EnvSwitcher />}
+            {me && me.role === "member" && <QuotaPill me={me} />}
+            {me && (
+              <span className="whoami" title={`Signed in as ${me.username} (${me.role})`}>
+                <span className={`role-tag ${me.role}`}>{me.role}</span>
+                {me.username}
+              </span>
+            )}
+            <button className="btn-icon logout" onClick={onLogout} title="Log out">
+              <Icon.Logout size={16} />
+            </button>
+          </div>
+        </header>
+
+        {/* Keyed by env so switching hosts remounts the views and re-fetches. */}
+        <main key={envId}>
+          {envDown ? (
+            <EnvUnreachable onSwitch={() => environment.set(0)} onRetry={() => setHealthNonce((n) => n + 1)} />
+          ) : (
+            <>
+          {activeTab === "overview" && <Overview me={me} isAdmin={!!isAdmin} onGo={go} />}
+          {activeTab === "containers" && <Containers />}
+          {activeTab === "services" && <Services me={me} onChanged={refreshMe} />}
+          {activeTab === "networks" && <Networks />}
+          {activeTab === "volumes" && <Volumes />}
+          {activeTab === "routes" && <Routes />}
+          {activeTab === "registries" && <Registries />}
+          {activeTab === "expose" && <Expose />}
+          {activeTab === "users" && <Users />}
+          {activeTab === "requests" && <Requests isAdmin={!!isAdmin} onReviewed={refreshMe} />}
+            </>
+          )}
+        </main>
+      </div>
+
+      {drawer && <button className="scrim" aria-label="Close menu" onClick={() => setDrawer(false)} />}
+    </div>
+  );
+}
+
+// dotState maps a possibly-unknown reachability to a status-dot class.
+function dotState(ok: boolean | undefined): string {
+  if (ok === undefined) return "pending";
+  return ok ? "ok" : "bad";
+}
+
+// EnvSwitcher is the multi-host environment selector in the topbar.
+function EnvSwitcher() {
+  const [list, , reload] = useAsync<Endpoint[]>(() => api.endpoints(), []);
+  const [status, setStatus] = useState<Record<number, boolean>>({});
+  const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [curId, setCurId] = useState(environment.get());
+
+  useEffect(() => environment.subscribe(() => setCurId(environment.get())), []);
+  useEffect(() => {
+    if (!list) return;
+    list.forEach((e) => api.endpointStatus(e.id).then((s) => setStatus((p) => ({ ...p, [e.id]: s.ok }))).catch(() => {}));
+  }, [list]);
+
+  const current = list?.find((e) => e.id === curId);
+  const select = (id: number) => {
+    environment.set(id);
+    setOpen(false);
+  };
+  const remove = async (e: Endpoint) => {
+    if (!window.confirm(`Remove environment ${e.name}?`)) return;
+    const ok = await run(api.deleteEndpoint(e.id), { success: `Removed ${e.name}` });
+    if (ok !== undefined) {
+      if (curId === e.id) environment.set(0);
+      reload();
+    }
+  };
+
+  return (
+    <div className="env-switcher">
+      <button type="button" className="env-current" onClick={() => setOpen((o) => !o)}>
+        <Icon.Server size={15} />
+        <span className="env-cur-name">{current?.name ?? "Local"}</span>
+        <span className={`dot ${dotState(status[curId])}`} />
+        <Icon.Chevron size={13} />
+      </button>
+      {open && (
+        <>
+          <button type="button" className="env-scrim" aria-label="Close" onClick={() => setOpen(false)} />
+          <div className="env-menu">
+            <div className="env-menu-label">Environments</div>
+            {list?.map((e) => (
+              <div key={e.id} className={`env-item ${e.id === curId ? "active" : ""}`}>
+                <button type="button" className="env-item-main" onClick={() => select(e.id)}>
+                  <span className={`dot ${dotState(status[e.id])}`} />
+                  <span className="env-name">{e.name}</span>
+                  <span className="muted mono env-host">{e.host}</span>
+                </button>
+                {!e.local && (
+                  <button type="button" className="btn-icon danger" title="Remove" onClick={() => remove(e)}>
+                    <Icon.Trash size={13} />
+                  </button>
+                )}
+              </div>
+            ))}
+            <button type="button" className="env-add" onClick={() => { setOpen(false); setAdding(true); }}>
+              <Icon.Plus size={14} /> <span>Add environment</span>
+            </button>
+          </div>
+        </>
+      )}
+      {adding && <EnvModal onClose={() => setAdding(false)} onAdded={() => { setAdding(false); reload(); }} />}
+    </div>
+  );
+}
+
+type ConnMode = "ssh" | "tls" | "plain";
+
+function EnvModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
+  const [mode, setMode] = useState<ConnMode>("ssh");
+  const [f, setF] = useState({ name: "", host: "", port: "", tlsCa: "", tlsCert: "", tlsKey: "" });
+  const [busy, setBusy] = useState(false);
+
+  const hostHint =
+    mode === "ssh" ? "ssh://user@10.0.0.5" : mode === "tls" ? "tcp://10.0.0.5:2376" : "tcp://10.0.0.5:2375";
+
+  // For SSH the port is optional (defaults to 22). When given, it overrides any
+  // port in the URL; the backend passes it to ssh via the ssh://host:port form.
+  const sshHost = () => {
+    const p = f.port.trim();
+    if (mode !== "ssh" || !p) return f.host.trim();
+    const base = f.host.trim().replace(/^ssh:\/\//, "").replace(/:\d+$/, "");
+    return `ssh://${base}:${p}`;
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    const host = sshHost();
+    const body =
+      mode === "tls"
+        ? { name: f.name, host, tlsCa: f.tlsCa, tlsCert: f.tlsCert, tlsKey: f.tlsKey }
+        : { name: f.name, host };
+    const res = await run(api.createEndpoint(body), { success: `Added ${f.name}` });
+    setBusy(false);
+    if (res) onAdded();
+  };
+
+  const modes: { key: ConnMode; icon: (p: { size?: number }) => JSX.Element; title: string; sub: string; rec?: boolean }[] = [
+    { key: "ssh", icon: Icon.Terminal, title: "SSH", sub: "Tunnel, no open port", rec: true },
+    { key: "tls", icon: Icon.Server, title: "TLS", sub: "TCP + client certs" },
+    { key: "plain", icon: Icon.Globe, title: "Plain", sub: "TCP, unencrypted" },
+  ];
+
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body env-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong>
+            <Icon.Server size={15} /> Add environment
+          </strong>
+          <button type="button" onClick={onClose} aria-label="Close">
+            <Icon.Close size={16} />
+          </button>
+        </div>
+        <form className="form modal-pad" onSubmit={submit}>
+          <div className="field">
+            <span className="field-label">Connection type</span>
+            <div className="conn-cards">
+              {modes.map((m) => (
+                <button
+                  key={m.key}
+                  type="button"
+                  className={`conn-card ${mode === m.key ? "active" : ""}`}
+                  onClick={() => setMode(m.key)}
+                >
+                  {m.rec && <span className="conn-rec">Recommended</span>}
+                  <m.icon size={20} />
+                  <span className="conn-title">{m.title}</span>
+                  <span className="conn-sub">{m.sub}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="row">
+            <Field label="Name" required>
+              <input required value={f.name} placeholder="prod-vm" onChange={(e) => setF({ ...f, name: e.target.value })} />
+            </Field>
+            <Field label="Docker host" required>
+              <input required value={f.host} placeholder={hostHint} onChange={(e) => setF({ ...f, host: e.target.value })} />
+            </Field>
+            {mode === "ssh" && (
+              <Field label="SSH port" help="Optional — defaults to 22. Set this if SSH runs on a non-standard port.">
+                <input
+                  className="port-input"
+                  inputMode="numeric"
+                  value={f.port}
+                  placeholder="22"
+                  onChange={(e) => setF({ ...f, port: e.target.value.replace(/[^0-9]/g, "") })}
+                />
+              </Field>
+            )}
+          </div>
+
+          {mode === "ssh" && (
+            <p className="env-note">
+              <Icon.Terminal size={14} />
+              <span>
+                Uses the EasyDeploy host's SSH keys — no Docker port is opened. The server must be able to{" "}
+                <code>
+                  ssh {f.port.trim() ? `-p ${f.port.trim()} ` : ""}
+                  {f.host.replace(/^ssh:\/\//, "").replace(/:\d+$/, "") || "user@host"}
+                </code>
+                .
+              </span>
+            </p>
+          )}
+          {mode === "plain" && (
+            <p className="env-note env-warn">
+              <Icon.Alert size={14} />
+              <span>Unauthenticated root access — only on a trusted, isolated network. Never over the internet.</span>
+            </p>
+          )}
+          {mode === "tls" && (
+            <div className="conn-tls">
+              <Field label="CA certificate (PEM)" required help="Required — verifies the daemon's identity">
+                <textarea required rows={2} value={f.tlsCa} onChange={(e) => setF({ ...f, tlsCa: e.target.value })} />
+              </Field>
+              <div className="row">
+                <Field label="Client cert (PEM)" required>
+                  <textarea required rows={2} value={f.tlsCert} onChange={(e) => setF({ ...f, tlsCert: e.target.value })} />
+                </Field>
+                <Field label="Client key (PEM)" required>
+                  <textarea required rows={2} value={f.tlsKey} onChange={(e) => setF({ ...f, tlsKey: e.target.value })} />
+                </Field>
+              </div>
+            </div>
+          )}
+
+          <div className="actions env-actions">
+            <span className="muted env-foot">Manages containers, images, volumes & networks on that host.</span>
+            <button type="button" onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+            <button type="submit" className="primary" disabled={busy}>
+              {busy ? <Icon.Spinner size={15} /> : <Icon.Plus size={15} />}
+              <span>Add environment</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// QuotaPill shows a member's live CPU/RAM usage against their granted quota.
+function QuotaPill({ me }: { me: Me }) {
+  const cpuPct = me.cpuQuotaMilli ? Math.min(100, (me.cpuUsedMilli / me.cpuQuotaMilli) * 100) : 0;
+  const memPct = me.memQuotaMB ? Math.min(100, (me.memUsedMB / me.memQuotaMB) * 100) : 0;
+  return (
+    <div className="quota-pill" title="Your resource usage vs. granted quota">
+      <span className="quota-metric">
+        <Icon.Cpu size={13} />
+        <span className="quota-bar">
+          <span className="quota-fill" style={{ width: `${cpuPct}%` }} />
+        </span>
+        {(me.cpuUsedMilli / 1000).toFixed(1)}/{(me.cpuQuotaMilli / 1000).toFixed(1)} CPU
+      </span>
+      <span className="quota-metric">
+        <Icon.Box size={13} />
+        <span className="quota-bar">
+          <span className="quota-fill" style={{ width: `${memPct}%` }} />
+        </span>
+        {me.memUsedMB}/{me.memQuotaMB} MB
+      </span>
+    </div>
+  );
+}
+
+// ===== Overview (home dashboard) =====
+
+function StatTile({
+  icon: I,
+  label,
+  value,
+  accent = "accent",
+  onClick,
+}: {
+  icon: (p: { size?: number }) => JSX.Element;
+  label: string;
+  value: number | undefined;
+  accent?: "ok" | "muted" | "accent" | "warn";
+  onClick?: () => void;
+}) {
+  return (
+    <button type="button" className={`stat-tile ${accent} ${onClick ? "clickable" : ""}`} onClick={onClick} disabled={!onClick}>
+      <span className="stat-icon">
+        <I size={18} />
+      </span>
+      <span className="stat-value">{value === undefined ? <span className="skeleton" style={{ width: 38, height: 22, borderRadius: 6 }} /> : value}</span>
+      <span className="stat-label">{label}</span>
+    </button>
+  );
+}
+
+function EnvHealth({ endpoints, onSwitch }: { endpoints: Endpoint[] | null; onSwitch: (id: number) => void }) {
+  const [status, setStatus] = useState<Record<number, { ok: boolean; version: string }>>({});
+  useEffect(() => {
+    endpoints?.forEach((e) => api.endpointStatus(e.id).then((s) => setStatus((p) => ({ ...p, [e.id]: s }))).catch(() => {}));
+  }, [endpoints]);
+  if (!endpoints) return <Loading />;
+  return (
+    <ul className="env-health">
+      {endpoints.map((e) => {
+        const s = status[e.id];
+        return (
+          <li key={e.id}>
+            <button type="button" className="env-health-row" onClick={() => onSwitch(e.id)}>
+              <span className={`dot ${dotState(s?.ok)}`} />
+              <span className="strong env-h-name">{e.name}</span>
+              <span className="muted mono env-h-host">{e.host}</span>
+              <span className="muted env-h-ver">{s ? s.version || "unreachable" : "…"}</span>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function Overview({ me, isAdmin, onGo }: { me: Me | null; isAdmin: boolean; onGo: (t: Tab) => void }) {
+  const [containers] = useAsync<Container[]>(() => api.containers(), []);
+  const [services] = useAsync<Service[]>(() => api.services(), []);
+  const [images] = useAsync<unknown[]>(() => api.images(), []);
+  const [networks] = useAsync<DockerNetwork[]>(() => api.networks(), []);
+  const [volumes] = useAsync<DockerVolume[]>(() => (isAdmin ? api.volumes() : Promise.resolve([] as DockerVolume[])), [isAdmin]);
+  const [endpoints] = useAsync<Endpoint[]>(() => (isAdmin ? api.endpoints() : Promise.resolve([] as Endpoint[])), [isAdmin]);
+  const [pending] = useAsync<ResourceRequest[]>(() => api.requests("pending"), []);
+
+  const running = containers ? containers.filter((c) => c.State === "running").length : undefined;
+  const stopped = containers ? containers.length - (running ?? 0) : undefined;
+  const num = (a: unknown[] | null) => (a ? a.length : undefined);
+
+  return (
+    <div className="overview">
+      <div className="stat-grid">
+        <StatTile icon={Icon.Play2} label="Running" value={running} accent="ok" onClick={() => onGo("containers")} />
+        <StatTile icon={Icon.Stop} label="Stopped" value={stopped} accent="muted" onClick={() => onGo("containers")} />
+        <StatTile icon={Icon.Layers} label="Services" value={num(services)} accent="accent" onClick={() => onGo("services")} />
+        <StatTile icon={Icon.Network} label="Networks" value={num(networks)} accent="accent" onClick={() => onGo("networks")} />
+        {isAdmin && <StatTile icon={Icon.Drive} label="Volumes" value={num(volumes)} accent="accent" onClick={() => onGo("volumes")} />}
+        <StatTile icon={Icon.Registry} label="Images" value={num(images)} accent="accent" />
+      </div>
+
+      <div className="ov-cols">
+        {isAdmin ? (
+          <div className="panel">
+            <div className="panel-head">
+              <Icon.Server size={15} /> Environments
+            </div>
+            <EnvHealth endpoints={endpoints} onSwitch={(id) => environment.set(id)} />
+          </div>
+        ) : (
+          me && (
+            <div className="panel">
+              <div className="panel-head">
+                <Icon.Cpu size={15} /> Your quota
+              </div>
+              <div className="ov-quota">
+                <QuotaBar label="CPU" used={me.cpuUsedMilli / 1000} total={me.cpuQuotaMilli / 1000} unit="cores" />
+                <QuotaBar label="Memory" used={me.memUsedMB} total={me.memQuotaMB} unit="MB" />
+              </div>
+            </div>
+          )
+        )}
+
+        <div className="panel">
+          <div className="panel-head">
+            <Icon.Inbox size={15} /> Needs attention
+          </div>
+          <div className="attention">
+            <button type="button" className="attn-item" onClick={() => onGo("requests")}>
+              <span className={`attn-dot ${pending && pending.length > 0 ? "warn" : "ok"}`} />
+              <span>
+                {pending === null ? "…" : pending.length} pending resource request{pending?.length === 1 ? "" : "s"}
+              </span>
+              <Icon.Chevron size={14} />
+            </button>
+            <button type="button" className="attn-item" onClick={() => onGo("containers")}>
+              <span className={`attn-dot ${stopped ? "muted" : "ok"}`} />
+              <span>
+                {stopped === undefined ? "…" : stopped} stopped container{stopped === 1 ? "" : "s"}
+              </span>
+              <Icon.Chevron size={14} />
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuotaBar({ label, used, total, unit }: { label: string; used: number; total: number; unit: string }) {
+  const pct = total ? Math.min(100, (used / total) * 100) : 0;
+  return (
+    <div className="ov-quota-item">
+      <div className="ov-quota-head">
+        <span className="muted">{label}</span>
+        <span className="mono">
+          {used.toFixed(unit === "cores" ? 1 : 0)} / {total} {unit}
+        </span>
+      </div>
+      <div className="meter">
+        <span className={`meter-fill ${pct >= 90 ? "critical" : pct >= 70 ? "warning" : "ok"}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []): [T | null, string | null, () => void] {
+  const [data, setData] = useState<T | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [nonce, setNonce] = useState(0);
+  useEffect(() => {
+    let live = true;
+    // The API serializes an empty Go slice as `null`; every useAsync caller is
+    // a list, so coerce null/undefined to [] — otherwise an empty result reads
+    // as "still loading" and the view spins forever.
+    fn()
+      .then((d) => live && setData((d ?? []) as T))
+      .catch((e) => live && setErr(String(e.message || e)));
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [...deps, nonce]);
+  return [data, err, () => setNonce((n) => n + 1)];
+}
+
+// ActionButton runs one async task with its own spinner + disabled state, and
+// reports the outcome through the global toast/activity system.
+function ActionButton({
+  icon: I,
+  label,
+  title,
+  variant = "default",
+  confirm: confirmMsg,
+  success,
+  task,
+  onDone,
+}: {
+  icon: (p: { size?: number }) => JSX.Element;
+  label?: string;
+  title?: string;
+  variant?: "default" | "primary" | "danger";
+  confirm?: string;
+  success?: string;
+  task: () => Promise<unknown>;
+  onDone?: () => void;
+}) {
+  const [busy, runAction] = useAction();
+  const onClick = async () => {
+    if (confirmMsg && !window.confirm(confirmMsg)) return;
+    await runAction(task(), success ? { success } : undefined);
+    onDone?.();
+  };
+  return (
+    <button type="button" className={`btn-icon ${variant}`} title={title || label} disabled={busy} onClick={onClick}>
+      {busy ? <Icon.Spinner size={15} /> : <I size={15} />}
+      {label && <span>{label}</span>}
+    </button>
+  );
+}
+
+const matchContainer = (c: Container, q: string) => {
+  const name = c.Names?.[0]?.replace(/^\//, "").toLowerCase() ?? "";
+  return (
+    name.includes(q) ||
+    c.Image.toLowerCase().includes(q) ||
+    c.State.toLowerCase().includes(q) ||
+    (c.Labels?.["easydeploy.subdomain"] ?? "").toLowerCase().includes(q)
+  );
+};
+
+function Containers() {
+  const [list, err, reload] = useAsync<Container[]>(() => api.containers(), []);
+  const [editing, setEditing] = useState<Container | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const sp = useSearchPage(list ?? [], matchContainer, 12);
+
+  if (err) return <Err msg={err} onRetry={reload} />;
+  if (!list) return <TableSkeleton cols={5} />;
+
+  // The open detail tracks the live container from the list, so lifecycle
+  // actions (which reload the list) refresh it, and a removed container closes.
+  const detailC = detailId ? list.find((c) => c.Id === detailId) ?? null : null;
+
+  return (
+    <>
+      <div className="toolbar">
+        <ActionButton icon={Icon.Refresh} label="Refresh" task={() => api.containers()} onDone={reload} />
+        <SearchInput value={sp.query} onChange={sp.setQuery} placeholder="Search name, image, state…" />
+        <span className="count">{sp.filtered.length} of {list.length} container{list.length === 1 ? "" : "s"}</span>
+      </div>
+      {list.length === 0 ? (
+        <Empty icon={Icon.Box} title="No containers yet" hint="Head to Deploy to launch your first one." />
+      ) : sp.filtered.length === 0 ? (
+        <Empty icon={Icon.Search} title="No matches" hint="No containers match your search." />
+      ) : (
+        <><div className="table-wrap"><table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Image</th>
+              <th>State</th>
+              <th>Subdomain</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sp.pageItems.map((c) => {
+              const name = c.Names?.[0]?.replace(/^\//, "");
+              return (
+                <tr key={c.Id} className="clickable-row" onClick={() => setDetailId(c.Id)} title="View details">
+                  <td className="strong">{name}</td>
+                  <td className="muted mono">{c.Image}</td>
+                  <td>
+                    <span className={`badge ${c.State}`}>
+                      <span className="badge-dot" />
+                      {c.State}
+                    </span>
+                  </td>
+                  <td className="muted">{c.Labels?.["easydeploy.subdomain"] || "—"}</td>
+                  <td className="actions" onClick={(e) => e.stopPropagation()}>
+                    {c.State === "running" ? (
+                      <ActionButton icon={Icon.Stop} title="Stop" success={`Stopped ${name}`} task={() => api.stop(c.Id)} onDone={reload} />
+                    ) : (
+                      <ActionButton icon={Icon.Play} title="Start" success={`Started ${name}`} task={() => api.start(c.Id)} onDone={reload} />
+                    )}
+                    <ActionButton icon={Icon.Restart} title="Restart" success={`Restarted ${name}`} task={() => api.restart(c.Id)} onDone={reload} />
+                    <ActionButton icon={Icon.Edit} title="Edit configuration" onDone={reload} task={async () => setEditing(c)} />
+                    <ActionButton
+                      icon={Icon.Update}
+                      title="Update image (pull latest & recreate)"
+                      confirm={`Pull the latest image and recreate ${name}?`}
+                      success={`Updated ${name}`}
+                      task={() => api.update(c.Id)}
+                      onDone={reload}
+                    />
+                    <button type="button" className="btn-icon" title="Details (logs, monitor, shell)" onClick={() => setDetailId(c.Id)}>
+                      <Icon.Logs size={15} />
+                    </button>
+                    <ActionButton
+                      icon={Icon.Trash}
+                      title="Remove"
+                      variant="danger"
+                      confirm={`Remove ${name}? This cannot be undone.`}
+                      success={`Removed ${name}`}
+                      task={() => api.remove(c.Id)}
+                      onDone={reload}
+                    />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table></div>
+        <Pager page={sp.page} pageCount={sp.pageCount} onPage={sp.setPage} /></>
+      )}
+      {detailC && (
+        <ContainerDetail
+          container={detailC}
+          onClose={() => setDetailId(null)}
+          onChanged={reload}
+          onEdit={() => {
+            setEditing(detailC);
+            setDetailId(null);
+          }}
+        />
+      )}
+      {editing && (
+        <ContainerEditor
+          container={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            reload();
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function Loading() {
+  return (
+    <div className="loading">
+      <Icon.Spinner size={22} />
+      <span>Loading…</span>
+    </div>
+  );
+}
+
+// useSearchPage filters a list by a text query and paginates the result. It
+// returns the current page's items plus the controls to render a search box and
+// pager. `match` decides whether an item matches the (already-lowercased) query.
+function useSearchPage<T>(items: T[], match: (item: T, q: string) => boolean, pageSize = 12) {
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
+  const q = query.trim().toLowerCase();
+  const filtered = useMemo(() => (q ? items.filter((it) => match(it, q)) : items), [items, q, match]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const clamped = Math.min(page, pageCount - 1);
+  const pageItems = filtered.slice(clamped * pageSize, clamped * pageSize + pageSize);
+  return {
+    query,
+    setQuery: (v: string) => {
+      setQuery(v);
+      setPage(0);
+    },
+    page: clamped,
+    setPage,
+    pageItems,
+    filtered,
+    pageCount,
+    total: items.length,
+  };
+}
+
+function SearchInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return (
+    <div className="search-box">
+      <Icon.Search size={15} />
+      <input value={value} placeholder={placeholder ?? "Search…"} onChange={(e) => onChange(e.target.value)} />
+      {value && (
+        <button type="button" className="search-clear" onClick={() => onChange("")} aria-label="Clear search">
+          <Icon.Close size={13} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Pager({ page, pageCount, onPage }: { page: number; pageCount: number; onPage: (p: number) => void }) {
+  if (pageCount <= 1) return null;
+  return (
+    <div className="pager">
+      <button type="button" className="btn-icon" disabled={page <= 0} onClick={() => onPage(page - 1)} aria-label="Previous page">
+        <Icon.Back size={14} />
+      </button>
+      <span className="pager-page">
+        Page {page + 1} of {pageCount}
+      </span>
+      <button type="button" className="btn-icon" disabled={page >= pageCount - 1} onClick={() => onPage(page + 1)} aria-label="Next page">
+        <Icon.Back size={14} className="flip-x" />
+      </button>
+    </div>
+  );
+}
+
+// Content-shaped placeholders shown while data loads, so a page settles into
+// place instead of flashing blank then popping. Prefer these over a spinner
+// for list/grid views.
+function TableSkeleton({ cols, rows = 6 }: { cols: number; rows?: number }) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <tbody>
+          {Array.from({ length: rows }).map((_, r) => (
+            <tr key={r}>
+              {Array.from({ length: cols }).map((_, c) => (
+                <td key={c}>
+                  <div className="skeleton sk-row" style={{ width: c === 0 ? "55%" : c === cols - 1 ? "36px" : "78%" }} />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CardSkeleton({ count = 4, className = "svc-grid" }: { count?: number; className?: string }) {
+  return (
+    <div className={className}>
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="skeleton sk-card" />
+      ))}
+    </div>
+  );
+}
+
+function Empty({
+  icon: I,
+  title,
+  hint,
+  action,
+}: {
+  icon: (p: { size?: number }) => JSX.Element;
+  title: string;
+  hint?: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="empty">
+      <span className="empty-icon">
+        <I size={26} />
+      </span>
+      <p className="empty-title">{title}</p>
+      {hint && <p className="muted">{hint}</p>}
+      {action && <div className="empty-action">{action}</div>}
+    </div>
+  );
+}
+
+function LogViewer({ container, onClose, embedded }: { container: Container; onClose?: () => void; embedded?: boolean }) {
+  const [lines, setLines] = useState<string[]>([]);
+  useEffect(() => {
+    let closed = false;
+    const ws = new WebSocket(wsURL(`/containers/${container.Id}/logs`));
+    ws.onmessage = (e) => setLines((prev) => [...prev.slice(-500), e.data as string]);
+    ws.onerror = () => {
+      if (!closed) setLines((prev) => [...prev, "[log stream error]"]);
+    };
+    return () => {
+      closed = true;
+      ws.close();
+    };
+  }, [container.Id]);
+  const body = <pre className="logs">{lines.join("") || "Waiting for log output…"}</pre>;
+  if (embedded) return body;
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong>{container.Names?.[0]}</strong>
+          <button onClick={onClose}>Close</button>
+        </div>
+        {body}
+      </div>
+    </div>
+  );
+}
+
+// ContainerDetail is the consolidated view opened by clicking a container: info,
+// live logs, monitoring, and an interactive shell in one tabbed modal.
+function ContainerDetail({
+  container,
+  onClose,
+  onChanged,
+  onEdit,
+}: {
+  container: Container;
+  onClose: () => void;
+  onChanged: () => void;
+  onEdit: () => void;
+}) {
+  const name = container.Names?.[0]?.replace(/^\//, "") || container.Id.slice(0, 12);
+  const running = container.State === "running";
+  const [tab, setTab] = useState<"overview" | "logs" | "monitor" | "shell">("overview");
+  const [info, setInfo] = useState<ContainerInspect | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.inspect(container.Id).then((i) => live && setInfo(i)).catch(() => live && setInfo(null));
+    return () => {
+      live = false;
+    };
+  }, [container.Id]);
+
+  const tabs = [
+    { k: "overview", label: "Overview", icon: Icon.Box, needRun: false },
+    { k: "logs", label: "Logs", icon: Icon.Logs, needRun: false },
+    { k: "monitor", label: "Monitor", icon: Icon.Activity, needRun: true },
+    { k: "shell", label: "Shell", icon: Icon.Terminal, needRun: true },
+  ] as const;
+  // If the container stops while open, fall back to a tab that still works.
+  const activeTab = !running && (tab === "monitor" || tab === "shell") ? "overview" : tab;
+
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body wide cdetail" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong>
+            <Icon.Box size={15} /> {name}
+            <span className={`badge ${container.State}`}>
+              <span className="badge-dot" /> {container.State}
+            </span>
+          </strong>
+          <button type="button" onClick={onClose} aria-label="Close">
+            <Icon.Close size={16} />
+          </button>
+        </div>
+
+        <div className="cdetail-actions">
+          {running ? (
+            <ActionButton icon={Icon.Stop} label="Stop" success={`Stopped ${name}`} task={() => api.stop(container.Id)} onDone={onChanged} />
+          ) : (
+            <ActionButton icon={Icon.Play} label="Start" success={`Started ${name}`} task={() => api.start(container.Id)} onDone={onChanged} />
+          )}
+          <ActionButton icon={Icon.Restart} label="Restart" success={`Restarted ${name}`} task={() => api.restart(container.Id)} onDone={onChanged} />
+          <ActionButton
+            icon={Icon.Update}
+            label="Update"
+            confirm={`Pull the latest image and recreate ${name}?`}
+            success={`Updated ${name}`}
+            task={() => api.update(container.Id)}
+            onDone={onChanged}
+          />
+          <button type="button" onClick={onEdit}>
+            <Icon.Edit size={14} /> <span>Edit</span>
+          </button>
+          <ActionButton
+            icon={Icon.Trash}
+            label="Remove"
+            variant="danger"
+            confirm={`Remove ${name}? This cannot be undone.`}
+            success={`Removed ${name}`}
+            task={() => api.remove(container.Id)}
+            onDone={onChanged}
+          />
+        </div>
+
+        <div className="cdetail-tabs">
+          {tabs.map((t) => (
+            <button
+              key={t.k}
+              type="button"
+              className={activeTab === t.k ? "active" : ""}
+              disabled={t.needRun && !running}
+              title={t.needRun && !running ? "Container is not running" : undefined}
+              onClick={() => setTab(t.k)}
+            >
+              <t.icon size={14} /> <span>{t.label}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className={`cdetail-body ${activeTab === "shell" ? "is-shell" : ""}`}>
+          {activeTab === "overview" && <ContainerOverview c={container} info={info} />}
+          {activeTab === "logs" && <LogViewer container={container} embedded />}
+          {activeTab === "monitor" && running && <Monitor container={container} embedded />}
+          {activeTab === "shell" && running && <Shell container={container} embedded />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ContainerOverview({ c, info }: { c: Container; info: ContainerInspect | null }) {
+  const ports = (c.Ports ?? []).filter((p) => p.PublicPort).map((p) => `${p.PublicPort}→${p.PrivatePort}/${p.Type}`);
+  const nets = info ? Object.keys(info.NetworkSettings.Networks ?? {}) : [];
+  const env = info?.Config.Env ?? [];
+  const labels = Object.entries(info?.Config.Labels ?? {});
+  const sub = c.Labels?.["easydeploy.subdomain"];
+  const owner = c.Labels?.["easydeploy.owner"];
+  const cpu = info?.HostConfig.NanoCpus ? `${(info.HostConfig.NanoCpus / 1e9).toFixed(2)} cores` : "unlimited";
+  const mem = info?.HostConfig.Memory ? fmtBytes(info.HostConfig.Memory) : "unlimited";
+  const rows: [string, React.ReactNode][] = [
+    ["Image", <span className="mono">{c.Image}</span>],
+    ["Status", c.Status],
+    ["Container ID", <span className="mono">{c.Id.slice(0, 12)}</span>],
+    ["Subdomain", sub || "—"],
+    ["Owner", owner || "—"],
+    ["CPU limit", cpu],
+    ["Memory limit", mem],
+    ["Networks", nets.join(", ") || "—"],
+    ["Published ports", ports.length ? <span className="mono">{ports.join(", ")}</span> : "—"],
+  ];
+  return (
+    <div className="cdetail-overview">
+      <dl className="kv">
+        {rows.map(([k, v]) => (
+          <div key={k}>
+            <dt>{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
+      </dl>
+      {env.length > 0 && (
+        <div className="kv-block">
+          <div className="kv-block-title">Environment</div>
+          <pre className="mono">{env.join("\n")}</pre>
+        </div>
+      )}
+      {labels.length > 0 && (
+        <div className="kv-block">
+          <div className="kv-block-title">Labels</div>
+          <pre className="mono">{labels.map(([k, v]) => `${k}=${v}`).join("\n")}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContainerEditor({
+  container,
+  onClose,
+  onSaved,
+}: {
+  container: Container;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const name = container.Names?.[0]?.replace(/^\//, "") || "";
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState<DeployRequest>({
+    name,
+    image: container.Image,
+    env: [],
+    subdomain: container.Labels?.["easydeploy.subdomain"] || "",
+    containerPort: 0,
+    publish: {},
+    network: "",
+    cpuMilli: 0,
+    memMB: 0,
+  });
+  const [envText, setEnvText] = useState("");
+
+  // Prefill from the live container config.
+  useEffect(() => {
+    let live = true;
+    api
+      .inspect(container.Id)
+      .then((info) => {
+        if (!live) return;
+        const env = info.Config.Env || [];
+        const firstPort = Object.keys(info.Config.ExposedPorts || {})[0];
+        const containerPort = firstPort ? parseInt(firstPort, 10) : 0;
+        const network = Object.keys(info.NetworkSettings.Networks || {})[0] || "";
+        const cpuMilli = Math.round((info.HostConfig.NanoCpus || 0) / 1_000_000);
+        const memMB = Math.round((info.HostConfig.Memory || 0) / (1024 * 1024));
+        setForm((f) => ({ ...f, image: info.Config.Image, containerPort, network, cpuMilli, memMB }));
+        setEnvText(env.join("\n"));
+        setLoaded(true);
+      })
+      .catch((e) => {
+        toast("error", String((e as Error).message || e));
+        setLoaded(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, [container.Id]);
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    const env = envText.split("\n").map((l) => l.trim()).filter(Boolean);
+    const res = await run(api.edit(container.Id, { ...form, env }), { success: `Saved ${name}` });
+    setBusy(false);
+    if (res) onSaved();
+  };
+
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong>
+            <Icon.Edit size={15} /> Edit {name}
+          </strong>
+          <button type="button" onClick={onClose} aria-label="Close">
+            <Icon.Close size={16} />
+          </button>
+        </div>
+        {busy && <div className="progress" />}
+        {!loaded ? (
+          <div className="modal-pad">
+            <Loading />
+          </div>
+        ) : (
+          <form className="form modal-pad" onSubmit={save}>
+            <label>
+              Image
+              <input value={form.image} onChange={(e) => setForm({ ...form, image: e.target.value })} />
+            </label>
+            <div className="row">
+              <label>
+                Subdomain
+                <input value={form.subdomain} onChange={(e) => setForm({ ...form, subdomain: e.target.value })} />
+              </label>
+              <label>
+                Container port
+                <input
+                  type="number"
+                  value={form.containerPort}
+                  onChange={(e) => setForm({ ...form, containerPort: Number(e.target.value) })}
+                />
+              </label>
+            </div>
+            <div className="row">
+              <label>
+                CPU (cores)
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={form.cpuMilli / 1000}
+                  onChange={(e) => setForm({ ...form, cpuMilli: Math.round(Number(e.target.value) * 1000) })}
+                />
+              </label>
+              <label>
+                Memory (MB)
+                <input
+                  type="number"
+                  min="0"
+                  value={form.memMB}
+                  onChange={(e) => setForm({ ...form, memMB: Number(e.target.value) })}
+                />
+              </label>
+            </div>
+            <label>
+              Environment (KEY=VALUE per line)
+              <textarea rows={5} value={envText} onChange={(e) => setEnvText(e.target.value)} />
+            </label>
+            <label>
+              Network
+              <input value={form.network} onChange={(e) => setForm({ ...form, network: e.target.value })} />
+            </label>
+            <div className="actions">
+              <button type="submit" className="primary" disabled={busy}>
+                {busy ? <Icon.Spinner size={15} /> : <Icon.Check size={15} />}
+                <span>{busy ? "Applying…" : "Apply & recreate"}</span>
+              </button>
+              <button type="button" onClick={onClose} disabled={busy}>
+                Cancel
+              </button>
+            </div>
+            <p className="hint">
+              Applying recreates the container with the new settings. Its name and data volumes are preserved; the
+              container ID changes.
+            </p>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// EdgeBanner shows the state of a remote environment's edge Envoy — the data
+// plane that makes Routes/Services work on that host. On the local host it
+// renders nothing (the local Envoy is always present). Placed atop the Routes
+// and Services tabs so a remote deploy has somewhere to publish to.
+function EdgeBanner() {
+  const [envId, setEnvId] = useState(environment.get());
+  const [status, setStatus] = useState<EdgeStatus | null | undefined>(undefined);
+  const [busy, act] = useAction();
+
+  useEffect(() => environment.subscribe(() => setEnvId(environment.get())), []);
+
+  const load = () => {
+    if (envId === 0) return;
+    setStatus(undefined);
+    api.edgeStatus(envId).then(setStatus).catch(() => setStatus(null));
+  };
+  useEffect(load, [envId]);
+
+  if (envId === 0) return null; // local host runs its own Envoy
+
+  const deploy = async () => {
+    const ok = await act(api.deployEdge(envId), { success: "Edge proxy deployed" });
+    if (ok !== undefined) setStatus(ok);
+  };
+  const remove = async () => {
+    if (!window.confirm("Remove the edge proxy? Routes/services on this host stop being served.")) return;
+    const ok = await act(api.removeEdge(envId), { success: "Edge proxy removed" });
+    if (ok !== undefined) load();
+  };
+
+  const running = status?.present && status.running;
+  const tone = running ? "ok" : status === undefined ? "" : "warn";
+
+  return (
+    <div className={`edge-banner ${tone}`}>
+      <span className="edge-ico">
+        <Icon.Globe size={16} />
+      </span>
+      <div className="edge-text">
+        {status === undefined ? (
+          <span className="strong">Checking edge proxy…</span>
+        ) : running ? (
+          <>
+            <span className="strong">Edge proxy running</span>
+            <span className="muted">Serving subdomains on this host{status.hostPort ? ` · port ${status.hostPort}` : ""}.</span>
+          </>
+        ) : (
+          <>
+            <span className="strong">No edge proxy on this host yet</span>
+            <span className="muted">Deploy an Envoy here so routes and services on this environment are served.</span>
+          </>
+        )}
+      </div>
+      <div className="edge-acts">
+        {status !== undefined && (
+          <>
+            <button type="button" className={running ? "" : "primary"} onClick={deploy} disabled={busy}>
+              {busy ? <Icon.Spinner size={14} /> : <Icon.Rocket size={14} />}
+              <span>{running ? "Redeploy" : status?.present ? "Restart" : "Deploy edge proxy"}</span>
+            </button>
+            {status?.present && (
+              <button type="button" className="danger" onClick={remove} disabled={busy}>
+                <Icon.Trash size={14} /> <span>Remove</span>
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Routes() {
+  const [list, err, reload] = useAsync<Route[]>(() => api.routes(), []);
+  const del = async (s: string) => {
+    try {
+      await api.deleteRoute(s);
+      reload();
+    } catch (e) {
+      toast("error", String(e));
+    }
+  };
+  if (err) return <Err msg={err} onRetry={reload} />;
+  if (!list) return (<><EdgeBanner /><TableSkeleton cols={3} /></>);
+  return (
+    <>
+    <EdgeBanner />
+    <div className="table-wrap"><table>
+      <thead>
+        <tr>
+          <th>Subdomain</th>
+          <th>Target</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {list.length === 0 && (
+          <tr>
+            <td colSpan={3} className="muted">
+              No routes yet. Deploy a container with a subdomain.
+            </td>
+          </tr>
+        )}
+        {list.map((r) => (
+          <tr key={r.id}>
+            <td>{r.subdomain}</td>
+            <td className="muted">
+              {r.targetHost}:{r.targetPort}
+            </td>
+            <td className="actions">
+              <button className="danger" onClick={() => del(r.subdomain)}>
+                Delete
+              </button>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table></div>
+    </>
+  );
+}
+
+function Expose() {
+  const [ip, setIp] = useState<string>("");
+  const [tunnels, err, reload] = useAsync<Tunnel[]>(() => api.tunnels(), []);
+  const [form, setForm] = useState({ name: "", sshHost: "", sshPort: 22, sshUser: "root", remotePort: 80, localPort: 10000 });
+
+  const create = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.createTunnel({ kind: "ssh", ...form });
+      reload();
+    } catch (err) {
+      toast("error", String(err));
+    }
+  };
+
+  return (
+    <div className="expose">
+      <section>
+        <h3>Option 1 — WiFi / NAT public IP</h3>
+        <button onClick={() => api.publicIP().then((r) => setIp(r.ip)).catch((e) => toast("error", String(e)))}>
+          Detect public IP
+        </button>
+        {ip && (
+          <p>
+            Public IP: <code>{ip}</code> — forward port 80 on your router to this machine.
+          </p>
+        )}
+      </section>
+
+      <section>
+        <h3>Option 2 — Cloud VM SSH reverse tunnel</h3>
+        <form className="form" onSubmit={create}>
+          <div className="row">
+            <label>
+              Name
+              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            </label>
+            <label>
+              SSH host
+              <input value={form.sshHost} onChange={(e) => setForm({ ...form, sshHost: e.target.value })} />
+            </label>
+          </div>
+          <div className="row">
+            <label>
+              SSH user
+              <input value={form.sshUser} onChange={(e) => setForm({ ...form, sshUser: e.target.value })} />
+            </label>
+            <label>
+              SSH port
+              <input type="number" value={form.sshPort} onChange={(e) => setForm({ ...form, sshPort: Number(e.target.value) })} />
+            </label>
+          </div>
+          <div className="row">
+            <label>
+              Remote port (on VM)
+              <input type="number" value={form.remotePort} onChange={(e) => setForm({ ...form, remotePort: Number(e.target.value) })} />
+            </label>
+            <label>
+              Local port (Envoy)
+              <input type="number" value={form.localPort} onChange={(e) => setForm({ ...form, localPort: Number(e.target.value) })} />
+            </label>
+          </div>
+          <button type="submit">Add tunnel</button>
+        </form>
+
+        {err && <Err msg={err} onRetry={reload} />}
+        <div className="table-wrap"><table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Target</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {tunnels?.map((t) => (
+              <tr key={t.id}>
+                <td>{t.name}</td>
+                <td className="muted">
+                  {t.sshUser}@{t.sshHost}:{t.remotePort} → :{t.localPort}
+                </td>
+                <td>
+                  <span className={`badge ${t.running ? "running" : "exited"}`}>
+                    {t.running ? "running" : "stopped"}
+                  </span>
+                </td>
+                <td className="actions">
+                  {t.running ? (
+                    <button onClick={() => api.stopTunnel(t.id).then(reload)}>Stop</button>
+                  ) : (
+                    <button onClick={() => api.startTunnel(t.id).then(reload).catch((e) => toast("error", String(e)))}>
+                      Start
+                    </button>
+                  )}
+                  <button className="danger" onClick={() => api.deleteTunnel(t.id).then(reload)}>
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      </section>
+    </div>
+  );
+}
+
+const matchNetwork = (n: DockerNetwork, q: string) =>
+  n.Name.toLowerCase().includes(q) || n.Driver.toLowerCase().includes(q) || (n.Scope ?? "").toLowerCase().includes(q);
+
+function Networks() {
+  const [list, err, reload] = useAsync<DockerNetwork[]>(() => api.networks(), []);
+  const [name, setName] = useState("");
+  const sp = useSearchPage(list ?? [], matchNetwork, 12);
+
+  const create = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.createNetwork(name);
+      setName("");
+      reload();
+    } catch (e) {
+      toast("error", String(e));
+    }
+  };
+  const del = async (id: string) => {
+    try {
+      await api.removeNetwork(id);
+      reload();
+    } catch (e) {
+      toast("error", String(e));
+    }
+  };
+
+  if (err) return <Err msg={err} onRetry={reload} />;
+  if (!list) return <TableSkeleton cols={5} />;
+  return (
+    <>
+      <form className="form inline" onSubmit={create}>
+        <input placeholder="new-network-name" value={name} onChange={(e) => setName(e.target.value)} />
+        <button type="submit">Create network</button>
+      </form>
+      <div className="toolbar">
+        <SearchInput value={sp.query} onChange={sp.setQuery} placeholder="Search networks…" />
+        <span className="count">{sp.filtered.length} of {list.length}</span>
+      </div>
+      <div className="table-wrap"><table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Driver</th>
+            <th>Scope</th>
+            <th>Containers</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {sp.pageItems.map((n) => (
+            <tr key={n.Id}>
+              <td>{n.Name}</td>
+              <td className="muted">{n.Driver}</td>
+              <td className="muted">{n.Scope}</td>
+              <td className="muted">{n.Containers ? Object.keys(n.Containers).length : 0}</td>
+              <td className="actions">
+                {!["bridge", "host", "none"].includes(n.Name) && (
+                  <button className="danger" onClick={() => del(n.Id)}>
+                    Delete
+                  </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table></div>
+      <Pager page={sp.page} pageCount={sp.pageCount} onPage={sp.setPage} />
+    </>
+  );
+}
+
+function Registries() {
+  const [list, err, reload] = useAsync<Registry[]>(() => api.registries(), []);
+  const [form, setForm] = useState({ name: "", url: "", username: "", password: "" });
+  const [testMsg, setTestMsg] = useState("");
+  const [browse, setBrowse] = useState<{ id: number; repos: string[] } | null>(null);
+
+  const create = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.createRegistry(form);
+      setForm({ name: "", url: "", username: "", password: "" });
+      reload();
+    } catch (e) {
+      toast("error", String(e));
+    }
+  };
+  const test = async () => {
+    setTestMsg("Testing…");
+    try {
+      await api.testRegistry(form);
+      setTestMsg("✓ Login OK");
+    } catch (e) {
+      setTestMsg("✗ " + String((e as Error).message || e));
+    }
+  };
+  const openCatalog = async (id: number) => {
+    try {
+      const { repositories } = await api.registryCatalog(id);
+      setBrowse({ id, repos: repositories || [] });
+    } catch (e) {
+      toast("error", String(e));
+    }
+  };
+
+  return (
+    <div className="expose">
+      <section>
+        <h3>Add registry</h3>
+        <form className="form" onSubmit={create}>
+          <div className="row">
+            <label>
+              Name
+              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            </label>
+            <label>
+              Host (e.g. ghcr.io)
+              <input value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} />
+            </label>
+          </div>
+          <div className="row">
+            <label>
+              Username
+              <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
+            </label>
+            <label>
+              Password / token
+              <input
+                type="password"
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+              />
+            </label>
+          </div>
+          <div className="actions">
+            <button type="submit">Save registry</button>
+            <button type="button" onClick={test}>
+              Test login
+            </button>
+            {testMsg && <span className="muted">{testMsg}</span>}
+          </div>
+          <p className="hint">Passwords are encrypted (AES-GCM) before storage and never returned by the API.</p>
+        </form>
+      </section>
+
+      <section>
+        <h3>Configured registries</h3>
+        {err && <Err msg={err} onRetry={reload} />}
+        <div className="table-wrap"><table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Host</th>
+              <th>User</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {list?.map((r) => (
+              <tr key={r.id}>
+                <td>{r.name}</td>
+                <td className="muted">{r.url}</td>
+                <td className="muted">{r.username || "—"}</td>
+                <td className="actions">
+                  <button onClick={() => openCatalog(r.id)}>Browse</button>
+                  <button className="danger" onClick={() => api.deleteRegistry(r.id).then(reload)}>
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+        {browse && (
+          <div className="modal" onClick={() => setBrowse(null)}>
+            <div className="modal-body" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-head">
+                <strong>Repositories</strong>
+                <button onClick={() => setBrowse(null)}>Close</button>
+              </div>
+              <div className="logs">
+                {browse.repos.length === 0 ? (
+                  <p className="muted">No repositories (or registry does not support _catalog).</p>
+                ) : (
+                  <ul>
+                    {browse.repos.map((repo) => (
+                      <li key={repo}>{repo}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function Users() {
+  const [list, err, reload] = useAsync<User[]>(() => api.users(), []);
+  const [form, setForm] = useState({ username: "", password: "", role: "member" as Role, cpuCores: 1, memMB: 512 });
+  const [busy, setBusy] = useState(false);
+
+  const create = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    const res = await run(
+      api.createUser({
+        username: form.username,
+        password: form.password,
+        role: form.role,
+        cpuQuotaMilli: Math.round(form.cpuCores * 1000),
+        memQuotaMB: form.memMB,
+      }),
+      { success: `Created ${form.username}` }
+    );
+    setBusy(false);
+    if (res) {
+      setForm({ username: "", password: "", role: "member", cpuCores: 1, memMB: 512 });
+      reload();
+    }
+  };
+
+  return (
+    <div className="expose">
+      <section>
+        <h3>Add user</h3>
+        <form className="form" onSubmit={create}>
+          <div className="row">
+            <label>
+              Username
+              <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
+            </label>
+            <label>
+              Password
+              <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+            </label>
+          </div>
+          <div className="row">
+            <label>
+              Role
+              <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })}>
+                <option value="member">member</option>
+                <option value="admin">admin</option>
+              </select>
+            </label>
+            <label>
+              CPU quota (cores)
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                value={form.cpuCores}
+                disabled={form.role === "admin"}
+                onChange={(e) => setForm({ ...form, cpuCores: Number(e.target.value) })}
+              />
+            </label>
+            <label>
+              Memory quota (MB)
+              <input
+                type="number"
+                min="0"
+                value={form.memMB}
+                disabled={form.role === "admin"}
+                onChange={(e) => setForm({ ...form, memMB: Number(e.target.value) })}
+              />
+            </label>
+          </div>
+          <button type="submit" className="primary" disabled={busy}>
+            {busy ? <Icon.Spinner size={15} /> : <Icon.Plus size={15} />}
+            <span>Create user</span>
+          </button>
+        </form>
+      </section>
+
+      <section>
+        <h3>Accounts</h3>
+        {err && <Err msg={err} onRetry={reload} />}
+        {!list ? (
+          <TableSkeleton cols={4} />
+        ) : (
+          <div className="table-wrap"><table>
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Role</th>
+                <th>Quota (CPU / RAM)</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((u) => (
+                <UserRow key={u.id} user={u} onChanged={reload} />
+              ))}
+            </tbody>
+          </table></div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function UserRow({ user, onChanged }: { user: User; onChanged: () => void }) {
+  const isAdmin = user.role === "admin";
+  const [cpuCores, setCpuCores] = useState(user.cpuQuotaMilli / 1000);
+  const [memMB, setMemMB] = useState(user.memQuotaMB);
+
+  return (
+    <tr>
+      <td className="strong">{user.username}</td>
+      <td>
+        <span className={`badge ${isAdmin ? "running" : ""}`}>{user.role}</span>
+      </td>
+      <td>
+        {isAdmin ? (
+          <span className="muted">unlimited</span>
+        ) : (
+          <span className="quota-edit">
+            <input type="number" step="0.1" min="0" value={cpuCores} onChange={(e) => setCpuCores(Number(e.target.value))} />
+            <span className="muted">cores</span>
+            <input type="number" min="0" value={memMB} onChange={(e) => setMemMB(Number(e.target.value))} />
+            <span className="muted">MB</span>
+          </span>
+        )}
+      </td>
+      <td className="actions">
+        {!isAdmin && (
+          <ActionButton
+            icon={Icon.Check2}
+            label="Save"
+            success={`Updated ${user.username}'s quota`}
+            task={() => api.updateUserQuota(user.id, Math.round(cpuCores * 1000), memMB)}
+            onDone={onChanged}
+          />
+        )}
+        <ActionButton
+          icon={Icon.Trash}
+          title="Delete user"
+          variant="danger"
+          confirm={`Delete ${user.username}?`}
+          success={`Deleted ${user.username}`}
+          task={() => api.deleteUser(user.id)}
+          onDone={onChanged}
+        />
+      </td>
+    </tr>
+  );
+}
+
+function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () => void }) {
+  const [list, err, reload] = useAsync<ResourceRequest[]>(() => api.requests(), []);
+  const [form, setForm] = useState({ cpuCores: 1, memMB: 512, note: "" });
+  const [busy, setBusy] = useState(false);
+
+  const fileRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    const res = await run(
+      api.createRequest({ cpuMilli: Math.round(form.cpuCores * 1000), memMB: form.memMB, note: form.note }),
+      { success: "Request submitted" }
+    );
+    setBusy(false);
+    if (res) {
+      setForm({ cpuCores: 1, memMB: 512, note: "" });
+      reload();
+    }
+  };
+
+  return (
+    <div className="expose">
+      {!isAdmin && (
+        <section>
+          <h3>Request resources</h3>
+          <form className="form" onSubmit={fileRequest}>
+            <div className="row">
+              <label>
+                CPU (cores)
+                <input type="number" step="0.1" min="0" value={form.cpuCores} onChange={(e) => setForm({ ...form, cpuCores: Number(e.target.value) })} />
+              </label>
+              <label>
+                Memory (MB)
+                <input type="number" min="0" value={form.memMB} onChange={(e) => setForm({ ...form, memMB: Number(e.target.value) })} />
+              </label>
+            </div>
+            <label>
+              Reason (optional)
+              <input placeholder="What is this for?" value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
+            </label>
+            <button type="submit" className="primary" disabled={busy}>
+              {busy ? <Icon.Spinner size={15} /> : <Icon.Inbox size={15} />}
+              <span>Submit request</span>
+            </button>
+            <p className="hint">An admin reviews your request. Once approved, the granted CPU/RAM becomes your quota.</p>
+          </form>
+        </section>
+      )}
+
+      <section>
+        <h3>{isAdmin ? "Resource requests" : "My requests"}</h3>
+        {err && <Err msg={err} onRetry={reload} />}
+        {!list ? (
+          <TableSkeleton cols={5} />
+        ) : list.length === 0 ? (
+          <Empty icon={Icon.Inbox} title="No requests" />
+        ) : (
+          <div className="table-wrap"><table>
+            <thead>
+              <tr>
+                {isAdmin && <th>User</th>}
+                <th>Requested</th>
+                <th>Reason</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((rq) => (
+                <RequestRow
+                  key={rq.id}
+                  rq={rq}
+                  isAdmin={isAdmin}
+                  onReviewed={() => {
+                    reload();
+                    onReviewed();
+                  }}
+                />
+              ))}
+            </tbody>
+          </table></div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function RequestRow({ rq, isAdmin, onReviewed }: { rq: ResourceRequest; isAdmin: boolean; onReviewed: () => void }) {
+  const pending = rq.status === "pending";
+  return (
+    <tr>
+      {isAdmin && <td className="strong">{rq.username}</td>}
+      <td className="muted">
+        {(rq.cpuMilli / 1000).toFixed(1)} CPU · {rq.memMB} MB
+      </td>
+      <td className="muted">{rq.note || "—"}</td>
+      <td>
+        <span className={`badge status-${rq.status}`}>{rq.status}</span>
+      </td>
+      <td className="actions">
+        {isAdmin && pending ? (
+          <>
+            <ActionButton
+              icon={Icon.Check2}
+              label="Approve"
+              variant="primary"
+              success={`Approved ${rq.username}`}
+              task={() => api.reviewRequest(rq.id, { approve: true })}
+              onDone={onReviewed}
+            />
+            <ActionButton
+              icon={Icon.Close}
+              label="Reject"
+              variant="danger"
+              success={`Rejected ${rq.username}`}
+              task={() => api.reviewRequest(rq.id, { approve: false })}
+              onDone={onReviewed}
+            />
+          </>
+        ) : (
+          rq.reviewedBy && <span className="muted">by {rq.reviewedBy}</span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+const matchService = (s: Service, q: string) =>
+  s.name.toLowerCase().includes(q) ||
+  s.image.toLowerCase().includes(q) ||
+  (s.subdomain ?? "").toLowerCase().includes(q) ||
+  (s.domains ?? []).some((d) => d.toLowerCase().includes(q));
+
+function Services({ me, onChanged }: { me: Me | null; onChanged: () => void }) {
+  const [list, err, reload] = useAsync<Service[]>(() => api.services(), []);
+  const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<Service | null>(null);
+  const [detailName, setDetailName] = useState<string | null>(null);
+  const isMember = me?.role === "member";
+  const sp = useSearchPage(list ?? [], matchService, 9);
+  const detailSvc = detailName ? list?.find((s) => s.name === detailName) ?? null : null;
+
+  const refreshAll = () => {
+    reload();
+    onChanged();
+  };
+
+  if (err) return <Err msg={err} onRetry={reload} />;
+  if (!list) return (<><EdgeBanner /><CardSkeleton count={4} /></>);
+
+  return (
+    <>
+      <EdgeBanner />
+      <div className="toolbar">
+        <button type="button" className="primary" onClick={() => setCreating(true)}>
+          <Icon.Plus size={15} />
+          <span>New service</span>
+        </button>
+        <button type="button" onClick={reload}>
+          <Icon.Refresh size={15} />
+          <span>Refresh</span>
+        </button>
+        {list.length > 0 && <SearchInput value={sp.query} onChange={sp.setQuery} placeholder="Search services…" />}
+        <span className="count">{sp.filtered.length} of {list.length} service{list.length === 1 ? "" : "s"}</span>
+      </div>
+
+      {list.length === 0 ? (
+        <Empty
+          icon={Icon.Layers}
+          title="No services yet"
+          hint="A service runs N load-balanced replicas behind one subdomain, with optional autoscaling and git deploys."
+        />
+      ) : sp.filtered.length === 0 ? (
+        <Empty icon={Icon.Search} title="No matches" hint="No services match your search." />
+      ) : (
+        <>
+          <div className="svc-grid">
+            {sp.pageItems.map((svc) => (
+              <ServiceCard
+                key={svc.id}
+                svc={svc}
+                onEdit={() => setEditing(svc)}
+                onOpen={() => setDetailName(svc.name)}
+                onChanged={refreshAll}
+              />
+            ))}
+          </div>
+          <Pager page={sp.page} pageCount={sp.pageCount} onPage={sp.setPage} />
+        </>
+      )}
+
+      {(creating || editing) && (
+        <ServiceEditor
+          isMember={!!isMember}
+          editing={editing}
+          onClose={() => {
+            setCreating(false);
+            setEditing(null);
+          }}
+          onCreated={() => {
+            setCreating(false);
+            setEditing(null);
+            refreshAll();
+          }}
+        />
+      )}
+
+      {detailSvc && (
+        <ServiceDetail
+          svc={detailSvc}
+          onClose={() => setDetailName(null)}
+          onChanged={refreshAll}
+          onEdit={() => {
+            setEditing(detailSvc);
+            setDetailName(null);
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function ServiceCard({ svc, onEdit, onOpen, onChanged }: { svc: Service; onEdit: () => void; onOpen: () => void; onChanged: () => void }) {
+  const [scaleBusy, scaleRun] = useAction();
+  const [subBusy, subRun] = useAction();
+  const webhookURL = `${location.origin}/api/hooks/${svc.webhookToken}`;
+
+  const scaleTo = (n: number) => scaleRun(api.scaleService(svc.name, n), { success: `Scaled ${svc.name} to ${n}` }).then(onChanged);
+
+  const editSubdomain = async () => {
+    const next = window.prompt(
+      "Custom subdomain — adds <subdomain>.<domain> alongside the automatic host. Leave blank to remove it.",
+      svc.subdomain || "",
+    );
+    if (next === null) return;
+    const v = next.trim();
+    const ok = await subRun(api.setServiceSubdomain(svc.name, v), {
+      success: v ? `Custom subdomain set to ${v}` : "Custom subdomain removed",
+    });
+    if (ok !== undefined) onChanged();
+  };
+  const copyHost = (h: string) => navigator.clipboard?.writeText(h).then(() => toast("success", `Copied ${h}`));
+
+  return (
+    <div className="svc-card">
+      <div className="svc-head">
+        <button type="button" className="svc-open" onClick={onOpen} title="View structure & replicas">
+          <span className="svc-name">
+            <Icon.Layers size={15} /> {svc.name}
+          </span>
+          <span className="muted mono svc-image">{svc.image}</span>
+        </button>
+        {svc.autoscale ? (
+          <span className="badge running" title={`Autoscale ${svc.minReplicas}–${svc.maxReplicas} @ ${svc.targetCpuPercent}% CPU`}>
+            <Icon.Cpu size={12} /> auto {svc.minReplicas}–{svc.maxReplicas}
+          </span>
+        ) : (
+          <span className="badge">manual</span>
+        )}
+      </div>
+
+      <div className="svc-meta">
+        <div className="svc-domains">
+          {(svc.domains ?? []).map((d, i) => (
+            <button
+              key={d}
+              type="button"
+              className="svc-domain"
+              title={`${i === 0 ? "Automatic host" : "Custom subdomain"} — click to copy`}
+              onClick={() => copyHost(d)}
+            >
+              <Icon.Globe size={13} />
+              <span className="mono svc-domain-name">{d}</span>
+              {i === 0 && <span className="dom-tag">auto</span>}
+            </button>
+          ))}
+          <button
+            type="button"
+            className="btn-icon dom-edit"
+            title={svc.subdomain ? "Edit custom subdomain" : "Add a custom subdomain"}
+            disabled={subBusy}
+            onClick={editSubdomain}
+          >
+            {subBusy ? <Icon.Spinner size={13} /> : <Icon.Edit size={13} />}
+          </button>
+        </div>
+        <span className="muted">
+          {(svc.cpuMilli / 1000).toFixed(2)} CPU / {svc.memMB} MB per replica · port {svc.containerPort}
+        </span>
+        {svc.gitRepo && (
+          <span className="muted mono svc-git" title={svc.gitRepo}>
+            <Icon.Git size={13} /> {svc.gitBranch}
+          </span>
+        )}
+      </div>
+
+      <div className="svc-replicas">
+        <span className="muted">Replicas</span>
+        <div className="stepper">
+          <button type="button" title="Scale down" disabled={scaleBusy || svc.replicas <= 0} onClick={() => scaleTo(svc.replicas - 1)}>
+            <Icon.Minus size={14} />
+          </button>
+          <span className="stepper-val">{scaleBusy ? <Icon.Spinner size={14} /> : svc.replicas}</span>
+          <button type="button" title="Scale up" disabled={scaleBusy} onClick={() => scaleTo(svc.replicas + 1)}>
+            <Icon.Plus size={14} />
+          </button>
+        </div>
+        <span className="lb-dots" title={`${svc.replicas} replicas load-balanced`}>
+          {Array.from({ length: Math.min(svc.replicas, 8) }).map((_, i) => (
+            <span key={i} className="lb-dot" />
+          ))}
+        </span>
+      </div>
+
+      {svc.gitRepo && (
+        <div className="svc-webhook">
+          <span className="muted">
+            <Icon.Webhook size={13} /> Push webhook
+          </span>
+          <input readOnly value={webhookURL} onFocus={(e) => e.currentTarget.select()} />
+          <button
+            type="button"
+            title="Copy"
+            onClick={() => navigator.clipboard?.writeText(webhookURL).then(() => toast("success", "Webhook URL copied"))}
+          >
+            Copy
+          </button>
+        </div>
+      )}
+
+      <div className="actions svc-actions">
+        <button type="button" onClick={onEdit} title="Edit configuration">
+          <Icon.Edit size={14} /> <span>Edit</span>
+        </button>
+        <ActionButton
+          icon={Icon.Update}
+          label={svc.gitRepo ? "Build & redeploy" : "Redeploy"}
+          title={svc.gitRepo ? "Clone repo, build image, roll out" : "Re-pull image and roll out"}
+          success={svc.gitRepo ? `Building ${svc.name}…` : `Redeployed ${svc.name}`}
+          task={() => api.redeployService(svc.name)}
+          onDone={onChanged}
+        />
+        <ActionButton
+          icon={Icon.Trash}
+          title="Delete service"
+          variant="danger"
+          confirm={`Delete service ${svc.name} and all its replicas?`}
+          success={`Deleted ${svc.name}`}
+          task={() => api.deleteService(svc.name)}
+          onDone={onChanged}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ServiceDetail visualizes a service's routing structure — domains → load
+// balancer → replica containers — plus its configuration, opened by clicking a
+// service card. Replicas show live state and open the container detail on click.
+function ServiceDetail({
+  svc,
+  onClose,
+  onChanged,
+  onEdit,
+}: {
+  svc: Service;
+  onClose: () => void;
+  onChanged: () => void;
+  onEdit: () => void;
+}) {
+  const [containers] = useAsync<Container[]>(() => api.containers(), []);
+  const [replicaDetail, setReplicaDetail] = useState<Container | null>(null);
+  const byName = new Map((containers ?? []).map((c) => [c.Names?.[0]?.replace(/^\//, "") ?? "", c]));
+  const replicas = Array.from({ length: svc.replicas }, (_, i) => {
+    const rn = `${svc.name}-${i}`;
+    return { name: rn, c: byName.get(rn) ?? null };
+  });
+  const runningCount = replicas.filter((r) => r.c?.State === "running").length;
+
+  return (
+    <>
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body wide cdetail" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong>
+            <Icon.Layers size={15} /> {svc.name}
+            <span className={`badge ${runningCount === svc.replicas && svc.replicas > 0 ? "running" : ""}`}>
+              <span className="badge-dot" /> {runningCount}/{svc.replicas} up
+            </span>
+          </strong>
+          <button type="button" onClick={onClose} aria-label="Close">
+            <Icon.Close size={16} />
+          </button>
+        </div>
+
+        <div className="cdetail-actions">
+          <button type="button" onClick={onEdit}>
+            <Icon.Edit size={14} /> <span>Edit</span>
+          </button>
+          <ActionButton
+            icon={Icon.Update}
+            label={svc.gitRepo ? "Build & redeploy" : "Redeploy"}
+            success={svc.gitRepo ? `Building ${svc.name}…` : `Redeployed ${svc.name}`}
+            task={() => api.redeployService(svc.name)}
+            onDone={onChanged}
+          />
+          <ActionButton
+            icon={Icon.Trash}
+            label="Delete"
+            variant="danger"
+            confirm={`Delete service ${svc.name} and all its replicas?`}
+            success={`Deleted ${svc.name}`}
+            task={() => api.deleteService(svc.name)}
+            onDone={() => {
+              onChanged();
+              onClose();
+            }}
+          />
+        </div>
+
+        <div className="cdetail-body">
+          <div className="cdetail-overview">
+            {/* Topology: domains → load balancer → replicas */}
+            <div className="svc-flow">
+              <div className="flow-node">
+                <div className="flow-node-title">
+                  <Icon.Globe size={14} /> Request routing
+                </div>
+                <div className="flow-domains">
+                  {(svc.domains ?? []).map((d, i) => (
+                    <span key={d} className="svc-domain static">
+                      <span className="mono svc-domain-name">{d}</span>
+                      {i === 0 && <span className="dom-tag">auto</span>}
+                    </span>
+                  ))}
+                  {(svc.domains ?? []).length === 0 && <span className="muted">No domains</span>}
+                </div>
+              </div>
+
+              <div className="flow-conn" />
+
+              <div className="flow-node accent">
+                <div className="flow-node-title">
+                  <Icon.Layers size={14} /> Load balancer
+                </div>
+                <div className="muted">
+                  Envoy · round-robin · container port {svc.containerPort} ·{" "}
+                  {svc.autoscale ? `autoscale ${svc.minReplicas}–${svc.maxReplicas} @ ${svc.targetCpuPercent}%` : "manual scale"}
+                </div>
+              </div>
+
+              <div className="flow-conn branch" />
+
+              <div className="flow-replicas">
+                {replicas.map((r) => {
+                  const state = r.c?.State ?? "pending";
+                  return (
+                    <button
+                      key={r.name}
+                      type="button"
+                      className="flow-replica"
+                      disabled={!r.c}
+                      title={r.c ? "Open container detail" : "Not created yet"}
+                      onClick={() => r.c && setReplicaDetail(r.c)}
+                    >
+                      <Icon.Box size={14} />
+                      <span className="mono flow-replica-name">{r.name}</span>
+                      <span className={`badge ${state}`}>
+                        <span className="badge-dot" /> {state}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Configuration */}
+            <dl className="kv">
+              <div>
+                <dt>Image</dt>
+                <dd className="mono">{svc.image}</dd>
+              </div>
+              <div>
+                <dt>Replicas</dt>
+                <dd>{svc.replicas}</dd>
+              </div>
+              <div>
+                <dt>Resources / replica</dt>
+                <dd>
+                  {(svc.cpuMilli / 1000).toFixed(2)} CPU · {svc.memMB} MB
+                </dd>
+              </div>
+              <div>
+                <dt>Network</dt>
+                <dd className="mono">{svc.network || "—"}</dd>
+              </div>
+              <div>
+                <dt>Custom subdomain</dt>
+                <dd>{svc.subdomain || "—"}</dd>
+              </div>
+              {svc.gitRepo && (
+                <div>
+                  <dt>Git</dt>
+                  <dd className="mono">
+                    {svc.gitRepo} @ {svc.gitBranch}
+                  </dd>
+                </div>
+              )}
+            </dl>
+          </div>
+        </div>
+      </div>
+    </div>
+    {replicaDetail && (
+      <ContainerDetail
+        container={replicaDetail}
+        onClose={() => setReplicaDetail(null)}
+        onChanged={onChanged}
+        onEdit={() => setReplicaDetail(null)}
+      />
+    )}
+    </>
+  );
+}
+
+type SectionKey = "basic" | "source" | "scaling" | "advanced";
+
+function ServiceEditor({
+  isMember,
+  editing,
+  onClose,
+  onCreated,
+}: {
+  isMember: boolean;
+  editing?: Service | null;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  // `advanced` is managed separately (adv state) and merged at submit.
+  const [f, setF] = useState<Omit<ServiceRequest, "advanced">>(() =>
+    editing
+      ? {
+          name: editing.name,
+          image: editing.image,
+          subdomain: editing.subdomain,
+          containerPort: editing.containerPort,
+          network: editing.network || "easydeploy-edge",
+          env: [],
+          cpuMilli: editing.cpuMilli,
+          memMB: editing.memMB,
+          replicas: editing.replicas,
+          minReplicas: editing.minReplicas,
+          maxReplicas: editing.maxReplicas,
+          autoscale: editing.autoscale,
+          targetCpuPercent: editing.targetCpuPercent,
+          gitRepo: editing.gitRepo,
+          gitBranch: editing.gitBranch || "main",
+          gitDockerfile: editing.gitDockerfile || "Dockerfile",
+        }
+      : {
+          name: "",
+          image: "nginx:alpine",
+          subdomain: "",
+          containerPort: 80,
+          network: "easydeploy-edge",
+          env: [],
+          cpuMilli: isMember ? 200 : 0,
+          memMB: isMember ? 128 : 0,
+          replicas: 1,
+          minReplicas: 1,
+          maxReplicas: 4,
+          autoscale: false,
+          targetCpuPercent: 60,
+          gitRepo: "",
+          gitBranch: "main",
+          gitDockerfile: "Dockerfile",
+        },
+  );
+  const [source, setSource] = useState<"image" | "git">(editing?.gitRepo ? "git" : "image");
+  const [envText, setEnvText] = useState(() => {
+    if (!editing?.env) return "";
+    try {
+      return (JSON.parse(editing.env) as string[]).join("\n");
+    } catch {
+      return "";
+    }
+  });
+  const [busy, setBusy] = useState(false);
+  const [adv, setAdv] = useState<AdvForm>(() => (editing ? advToForm(editing.advanced) : emptyAdvForm()));
+  const [open, setOpen] = useState<Record<SectionKey, boolean>>({
+    basic: true,
+    source: true,
+    scaling: false,
+    advanced: false,
+  });
+  const toggle = (k: SectionKey) => setOpen((o) => ({ ...o, [k]: !o[k] }));
+  const update = (patch: Partial<typeof f>) => setF((prev) => ({ ...prev, ...patch }));
+
+  // Completion state drives the green checks in the section headers.
+  const basicDone = f.name.trim() !== "";
+  const sourceDone = source === "image" ? f.image.trim() !== "" : f.gitRepo.trim() !== "";
+  const scalingDone = !isMember || (f.cpuMilli > 0 && f.memMB > 0);
+  const canSubmit = basicDone && sourceDone && scalingDone;
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setBusy(true);
+    const env = envText.split("\n").map((l) => l.trim()).filter(Boolean);
+    // In image mode, clear any git repo so the backend treats it as image-based.
+    const payload = { ...f, gitRepo: source === "git" ? f.gitRepo : "", env, advanced: buildAdvanced(adv) };
+    const res = editing
+      ? await run(api.updateService(editing.name, payload), { success: `Updated service ${editing.name}` })
+      : await run(api.createService(payload), { success: `Created service ${f.name}` });
+    setBusy(false);
+    if (res) onCreated();
+  };
+
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body wizard" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong>
+            <Icon.Layers size={15} /> {editing ? `Edit service · ${editing.name}` : "New service"}
+          </strong>
+          <button type="button" onClick={onClose} aria-label="Close">
+            <Icon.Close size={16} />
+          </button>
+        </div>
+        {busy && <div className="progress" />}
+        <form className="wizard-body modal-pad" onSubmit={submit}>
+          {/* 1. Basic information */}
+          <Section
+            icon={Icon.Box}
+            title="Basic information"
+            subtitle="Name and expose your service"
+            done={basicDone}
+            open={open.basic}
+            onToggle={() => toggle("basic")}
+          >
+            <Field label="Service name" required help={editing ? "The name identifies the service and can't be changed after creation." : "A unique name; replica containers are named <name>-0, <name>-1, …"}>
+              <input required value={f.name} placeholder="my-app" disabled={!!editing} onChange={(e) => update({ name: e.target.value })} />
+            </Field>
+            <div className="row">
+              <Field label="Custom subdomain (optional)" help="Optional vanity host <subdomain>.<base-domain>. The service always gets an automatic host <name>.<server>.<base-domain> too. You can set or change this later.">
+                <input value={f.subdomain} placeholder="(optional)" onChange={(e) => update({ subdomain: e.target.value })} />
+              </Field>
+              <Field label="Container port" help="The port your app listens on inside the container">
+                <input type="number" value={f.containerPort} onChange={(e) => update({ containerPort: Number(e.target.value) })} />
+              </Field>
+              <Field label="Network">
+                <input value={f.network} onChange={(e) => update({ network: e.target.value })} />
+              </Field>
+            </div>
+          </Section>
+
+          {/* 2. Source */}
+          <Section
+            icon={Icon.Git}
+            title="Source"
+            subtitle="Where the container image comes from"
+            done={sourceDone}
+            open={open.source}
+            onToggle={() => toggle("source")}
+          >
+            <SourceSelector
+              value={source}
+              onChange={(k) => setSource(k as "image" | "git")}
+              options={[
+                { key: "image", icon: Icon.Registry, tag: "Deployment", title: "Deploy a Docker image" },
+                { key: "git", icon: Icon.Git, tag: "Combined", title: "Build & deploy a Git repo" },
+              ]}
+            />
+            {source === "image" ? (
+              <Field label="Image" required help="Any image reference — pulls with a matching registry's credentials if configured">
+                <input required value={f.image} placeholder="nginx:alpine" onChange={(e) => update({ image: e.target.value })} />
+              </Field>
+            ) : (
+              <>
+                <Field label="Repository URL" required help="Cloned on each webhook / redeploy, then built with the Docker SDK">
+                  <input required value={f.gitRepo} placeholder="https://github.com/you/app.git" onChange={(e) => update({ gitRepo: e.target.value })} />
+                </Field>
+                <div className="row">
+                  <Field label="Branch">
+                    <input value={f.gitBranch} onChange={(e) => update({ gitBranch: e.target.value })} />
+                  </Field>
+                  <Field label="Dockerfile">
+                    <input value={f.gitDockerfile} onChange={(e) => update({ gitDockerfile: e.target.value })} />
+                  </Field>
+                </div>
+                <p className="hint">A push webhook URL is generated after creation, so `git push` rebuilds and rolls out automatically.</p>
+              </>
+            )}
+            <Field label="Environment" hint={<span className="muted">KEY=VALUE per line</span>}>
+              <textarea rows={3} value={envText} onChange={(e) => setEnvText(e.target.value)} />
+            </Field>
+          </Section>
+
+          {/* 3. Replicas, scaling & resources */}
+          <Section
+            icon={Icon.Layers}
+            title="Replicas & resources"
+            subtitle={f.autoscale ? `Autoscale ${f.minReplicas}–${f.maxReplicas} on CPU` : `${f.replicas} replica${f.replicas === 1 ? "" : "s"}, load-balanced`}
+            done={scalingDone}
+            open={open.scaling}
+            onToggle={() => toggle("scaling")}
+          >
+            <div className="row">
+              <Field label="Replicas" help="Identical containers Envoy round-robins across">
+                <input type="number" min="0" value={f.replicas} onChange={(e) => update({ replicas: Number(e.target.value) })} />
+              </Field>
+              <label className="check auto-toggle">
+                <input type="checkbox" checked={f.autoscale} onChange={(e) => update({ autoscale: e.target.checked })} />
+                <span>Autoscale on CPU</span>
+              </label>
+            </div>
+            {f.autoscale && (
+              <div className="row">
+                <Field label="Min replicas">
+                  <input type="number" min="1" value={f.minReplicas} onChange={(e) => update({ minReplicas: Number(e.target.value) })} />
+                </Field>
+                <Field label="Max replicas">
+                  <input type="number" min="1" value={f.maxReplicas} onChange={(e) => update({ maxReplicas: Number(e.target.value) })} />
+                </Field>
+                <Field label="Target CPU %">
+                  <input type="number" min="1" max="100" value={f.targetCpuPercent} onChange={(e) => update({ targetCpuPercent: Number(e.target.value) })} />
+                </Field>
+              </div>
+            )}
+            <div className="row">
+              <Field label="CPU per replica (cores)" required={isMember}>
+                <input type="number" step="0.1" min="0" required={isMember} value={f.cpuMilli / 1000} onChange={(e) => update({ cpuMilli: Math.round(Number(e.target.value) * 1000) })} />
+              </Field>
+              <Field label="Memory per replica (MB)" required={isMember}>
+                <input type="number" min="0" required={isMember} value={f.memMB} onChange={(e) => update({ memMB: Number(e.target.value) })} />
+              </Field>
+            </div>
+          </Section>
+
+          {/* 4. Advanced Docker options */}
+          <Section
+            icon={Icon.Cpu}
+            title="Advanced Docker options"
+            subtitle="Mounts, ports, capabilities, healthcheck, and more"
+            open={open.advanced}
+            onToggle={() => toggle("advanced")}
+          >
+            <AdvancedPanel form={adv} onChange={setAdv} />
+          </Section>
+        </form>
+
+        <div className="wizard-foot">
+          <span className="muted wizard-status">
+            {canSubmit ? (
+              <>
+                <Icon.Check size={14} /> {editing ? "Ready to save" : "Ready to create"}
+              </>
+            ) : (
+              "Fill the required fields to continue"
+            )}
+          </span>
+          <div className="actions">
+            <button type="button" onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+            <button type="button" className="primary" disabled={busy || !canSubmit} onClick={submit}>
+              {busy ? <Icon.Spinner size={15} /> : <Icon.Layers size={15} />}
+              <span>{busy ? (editing ? "Saving…" : "Creating…") : editing ? "Save changes" : "Create service"}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function fmtBytes(n: number): string {
+  if (n < 0) return "—";
+  if (n < 1024) return `${n} B`;
+  const u = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < u.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${u[i]}`;
+}
+
+const matchVolume = (v: DockerVolume, q: string) => v.name.toLowerCase().includes(q) || v.driver.toLowerCase().includes(q);
+
+function Volumes() {
+  const [list, err, reload] = useAsync<DockerVolume[]>(() => api.volumes(), []);
+  const [usage, setUsage] = useState<Record<string, { size: number; refCount: number }> | null>(null);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [browse, setBrowse] = useState<DockerVolume | null>(null);
+  const sp = useSearchPage(list ?? [], matchVolume, 12);
+
+  // Size / ref-count are computed by the (slow) DiskUsage call, fetched lazily
+  // after the list renders so the tab is instant even on busy remote hosts.
+  useEffect(() => {
+    if (!list) return;
+    let live = true;
+    setUsage(null);
+    api.volumeUsage().then((u) => live && setUsage(u)).catch(() => live && setUsage({}));
+    return () => {
+      live = false;
+    };
+  }, [list]);
+
+  const create = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    const res = await run(api.createVolume(name), { success: `Created volume ${name}` });
+    setBusy(false);
+    if (res !== undefined) {
+      setName("");
+      reload();
+    }
+  };
+
+  if (err) return <Err msg={err} onRetry={reload} />;
+  if (!list) return <TableSkeleton cols={5} />;
+
+  return (
+    <>
+      <form className="form inline" onSubmit={create}>
+        <input placeholder="new-volume-name" value={name} onChange={(e) => setName(e.target.value)} />
+        <button type="submit" className="primary" disabled={busy || !name.trim()}>
+          {busy ? <Icon.Spinner size={15} /> : <Icon.Plus size={15} />}
+          <span>Create volume</span>
+        </button>
+        <span className="count">{list.length} volume{list.length === 1 ? "" : "s"}</span>
+      </form>
+
+      {list.length > 0 && (
+        <div className="toolbar">
+          <SearchInput value={sp.query} onChange={sp.setQuery} placeholder="Search volumes…" />
+          <span className="count">{sp.filtered.length} of {list.length}</span>
+        </div>
+      )}
+
+      {list.length === 0 ? (
+        <Empty icon={Icon.Drive} title="No volumes" hint="Create one above, or deploy a service with a volume mount." />
+      ) : sp.filtered.length === 0 ? (
+        <Empty icon={Icon.Search} title="No matches" hint="No volumes match your search." />
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Driver</th>
+                <th>Size</th>
+                <th>In use</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {sp.pageItems.map((v) => {
+                const u = usage?.[v.name];
+                const refs = u ? u.refCount : -1;
+                return (
+                  <tr key={v.name}>
+                    <td className="strong mono" title={v.mountpoint}>{v.name}</td>
+                    <td className="muted">{v.driver}</td>
+                    <td className="mono">{u ? fmtBytes(u.size) : usage ? "—" : <span className="muted">…</span>}</td>
+                    <td>
+                      {refs > 0 ? (
+                        <span className="badge running">{refs} container{refs === 1 ? "" : "s"}</span>
+                      ) : refs === 0 ? (
+                        <span className="badge">unused</span>
+                      ) : (
+                        <span className="muted">…</span>
+                      )}
+                    </td>
+                    <td className="actions">
+                      <button type="button" className="btn-icon" title="Browse files" onClick={() => setBrowse(v)}>
+                        <Icon.Folder size={15} />
+                      </button>
+                      <ActionButton
+                        icon={Icon.Trash}
+                        title="Delete volume"
+                        variant="danger"
+                        confirm={refs > 0 ? `${v.name} is in use by ${refs} container(s). Force delete?` : `Delete volume ${v.name}?`}
+                        success={`Deleted ${v.name}`}
+                        task={() => api.removeVolume(v.name, refs > 0)}
+                        onDone={reload}
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {list.length > 0 && sp.filtered.length > 0 && <Pager page={sp.page} pageCount={sp.pageCount} onPage={sp.setPage} />}
+      {browse && <VolumeBrowser volume={browse} onClose={() => setBrowse(null)} />}
+    </>
+  );
+}
+
+function VolumeBrowser({ volume, onClose }: { volume: DockerVolume; onClose: () => void }) {
+  const [path, setPath] = useState("/");
+  const [files, setFiles] = useState<VolFile[] | null>(null);
+  const [err, setErr] = useState("");
+  const [nonce, setNonce] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [upload, setUpload] = useState<{ name: string; pct: number; sending: boolean } | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const reload = () => setNonce((n) => n + 1);
+  const join = (dir: string, n: string) => (dir.endsWith("/") ? dir : dir + "/") + n;
+
+  useEffect(() => {
+    let live = true;
+    setFiles(null);
+    setErr("");
+    api
+      .browseVolume(volume.name, path)
+      .then((r) => live && setFiles(r.files ?? []))
+      .catch((e) => live && setErr(String((e as Error).message || e)));
+    return () => {
+      live = false;
+    };
+  }, [volume.name, path, nonce]);
+
+  const enter = (f: VolFile) => {
+    if (f.dir) setPath((p) => join(p, f.name));
+  };
+  const up = () => setPath((p) => p.replace(/\/[^/]+\/?$/, "") || "/");
+
+  const newFolder = async () => {
+    const n = window.prompt("New folder name");
+    if (!n) return;
+    setBusy(true);
+    const ok = await run(api.mkdirVolume(volume.name, join(path, n)), { success: `Created ${n}` });
+    setBusy(false);
+    if (ok !== undefined) reload();
+  };
+  const onUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    setBusy(true);
+    setUpload({ name: f.name, pct: 0, sending: true });
+    const ok = await run(
+      api.uploadVolumeFile(volume.name, path, f, (frac) =>
+        setUpload({ name: f.name, pct: frac < 0 ? 100 : Math.round(frac * 100), sending: frac >= 0 }),
+      ),
+      { success: `Uploaded ${f.name}` },
+    );
+    setBusy(false);
+    setUpload(null);
+    if (ok !== undefined) reload();
+  };
+  const del = async (f: VolFile) => {
+    if (!window.confirm(`Delete ${f.name}${f.dir ? " and its contents" : ""}?`)) return;
+    setBusy(true);
+    const ok = await run(api.deleteVolumeFile(volume.name, join(path, f.name)), { success: `Deleted ${f.name}` });
+    setBusy(false);
+    if (ok !== undefined) reload();
+  };
+  const download = (f: VolFile) => {
+    const a = document.createElement("a");
+    a.href = api.downloadVolumeURL(volume.name, join(path, f.name));
+    a.download = f.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const sorted = files ? [...files].sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1)) : null;
+
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body wide" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong>
+            <Icon.Drive size={15} /> {volume.name}
+          </strong>
+          <button type="button" onClick={onClose} aria-label="Close">
+            <Icon.Close size={16} />
+          </button>
+        </div>
+        <div className="vol-path">
+          <button type="button" className="btn-icon" onClick={up} disabled={path === "/" || busy} title="Up">
+            <Icon.Back size={15} />
+          </button>
+          <span className="mono vol-crumb">{path}</span>
+          <div className="vol-tools">
+            <button type="button" onClick={newFolder} disabled={busy}>
+              <Icon.FolderPlus size={15} /> <span>New folder</span>
+            </button>
+            <button type="button" onClick={() => fileInput.current?.click()} disabled={busy}>
+              {busy ? <Icon.Spinner size={15} /> : <Icon.Upload size={15} />} <span>Upload</span>
+            </button>
+            <input ref={fileInput} type="file" hidden onChange={onUpload} />
+          </div>
+        </div>
+        {upload && (
+          <div className="vol-upload">
+            <div className="vol-upload-row">
+              <Icon.Upload size={13} />
+              <span className="file-name mono">{upload.name}</span>
+              <span className="muted">{upload.sending ? `${upload.pct}%` : "writing…"}</span>
+            </div>
+            <div className="vol-progress">
+              <div
+                className={`vol-progress-fill${upload.sending ? "" : " indeterminate"}`}
+                style={{ width: `${upload.pct}%` }}
+              />
+            </div>
+          </div>
+        )}
+        <div className="mon-body vol-list">
+          {err && <Err msg={err} onRetry={reload} />}
+          {!sorted ? (
+            <Loading />
+          ) : sorted.length === 0 ? (
+            <p className="muted">Empty directory.</p>
+          ) : (
+            <ul className="filelist">
+              {sorted.map((f) => (
+                <li key={f.name} className="file-item">
+                  <button type="button" className={`file-main ${f.dir ? "is-dir" : ""}`} onClick={() => enter(f)} disabled={!f.dir}>
+                    {f.dir ? <Icon.Folder size={15} /> : <Icon.File size={15} />}
+                    <span className="file-name">{f.name}</span>
+                  </button>
+                  <span className="muted file-size">{f.dir ? "" : fmtBytes(f.size)}</span>
+                  <span className="file-acts">
+                    {!f.dir && (
+                      <button type="button" className="btn-icon" title="Download" onClick={() => download(f)}>
+                        <Icon.Download size={15} />
+                      </button>
+                    )}
+                    <button type="button" className="btn-icon danger" title="Delete" onClick={() => del(f)} disabled={busy}>
+                      <Icon.Trash size={15} />
+                    </button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <p className="hint vol-foot">Files are read/written through a helper container mounted on the volume.</p>
+      </div>
+    </div>
+  );
+}
+
+function Err({ msg, onRetry }: { msg: string; onRetry?: () => void }) {
+  return (
+    <div className="error-panel">
+      <span className="err-icon">
+        <Icon.Alert size={22} />
+      </span>
+      <p className="err-title">Something went wrong</p>
+      <p className="err-msg">{msg}</p>
+      {onRetry && (
+        <button type="button" className="err-retry" onClick={onRetry}>
+          <Icon.Refresh size={14} /> <span>Try again</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+// EnvUnreachable replaces the tab content when the selected remote environment
+// isn't responding, so the user gets a clear action instead of endless
+// skeletons while requests hang on a dead host.
+function EnvUnreachable({ onSwitch, onRetry }: { onSwitch: () => void; onRetry: () => void }) {
+  return (
+    <div className="error-panel">
+      <span className="err-icon">
+        <Icon.Server size={22} />
+      </span>
+      <p className="err-title">Environment unreachable</p>
+      <p className="err-msg">
+        This remote host isn’t responding — it may be offline, or the SSH/TCP connection is blocked. Switch to the local
+        host, or retry once it’s back.
+      </p>
+      <div className="err-actions">
+        <button type="button" className="primary" onClick={onSwitch}>
+          <Icon.Server size={14} /> <span>Switch to Local</span>
+        </button>
+        <button type="button" onClick={onRetry}>
+          <Icon.Refresh size={14} /> <span>Retry</span>
+        </button>
+      </div>
+    </div>
+  );
+}

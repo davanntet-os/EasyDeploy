@@ -1,0 +1,72 @@
+# EasyDeploy stack: the control-plane/API server plus the Envoy data plane.
+#
+# The server needs the Docker socket to manage containers. Envoy publishes
+# port 10000 (all subdomains) and 9901 (admin). Managed containers should be
+# attached to the `edge` network so Envoy can resolve them by name.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: easydeploy
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-easydeploy}"
+      POSTGRES_DB: easydeploy
+    volumes:
+      - easydeploy-pgdata:/var/lib/postgresql/data
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U easydeploy"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  easydeploy:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    environment:
+      EASYDEPLOY_HTTP_ADDR: ":8080"
+      EASYDEPLOY_XDS_ADDR: ":18000"
+      EASYDEPLOY_DATABASE_URL: "postgres://easydeploy:${POSTGRES_PASSWORD:-easydeploy}@postgres:5432/easydeploy?sslmode=disable"
+      EASYDEPLOY_BASE_DOMAIN: "${EASYDEPLOY_BASE_DOMAIN:-localhost}"
+      EASYDEPLOY_ENVOY_NODE_ID: "easydeploy-envoy"
+      # Required secrets — set these in your environment or a .env file.
+      EASYDEPLOY_ADMIN_PASSWORD: "${EASYDEPLOY_ADMIN_PASSWORD:?set EASYDEPLOY_ADMIN_PASSWORD}"
+      EASYDEPLOY_SECRET_KEY: "${EASYDEPLOY_SECRET_KEY:?set EASYDEPLOY_SECRET_KEY}"
+      EASYDEPLOY_JWT_SECRET: "${EASYDEPLOY_JWT_SECRET:-}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8080:8080"   # web UI + REST/WebSocket API
+      - "18000:18000" # xDS gRPC (Envoy connects here)
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - edge
+    restart: unless-stopped
+
+  envoy:
+    image: envoyproxy/envoy:v1.31-latest
+    command: ["-c", "/etc/envoy/envoy.yaml", "--service-node", "easydeploy-envoy", "--service-cluster", "easydeploy"]
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "80:10000"  # public HTTP; all subdomains are served here
+      - "9901:9901" # Envoy admin
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - easydeploy
+    networks:
+      - edge
+    restart: unless-stopped
+
+networks:
+  # Managed app containers join this network so Envoy can reach them by name.
+  edge:
+    name: easydeploy-edge
+
+volumes:
+  easydeploy-pgdata:

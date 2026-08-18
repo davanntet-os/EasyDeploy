@@ -1,0 +1,13 @@
+# Go
+/server/easydeploy
+
+# Local env / secrets
+.env
+
+# Node / frontend
+/web/node_modules
+/web/dist
+
+# Editor / OS
+.DS_Store
+*.local

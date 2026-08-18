@@ -1,0 +1,56 @@
+# Envoy bootstrap configuration for EasyDeploy.
+#
+# Envoy starts nearly empty: it knows only how to reach the EasyDeploy xDS
+# control plane. All listeners, routes, and clusters are delivered
+# dynamically over gRPC, so deploying a container and assigning it a
+# subdomain reconfigures Envoy live without a restart.
+#
+# The node id MUST match EASYDEPLOY_ENVOY_NODE_ID on the server.
+node:
+  id: easydeploy-envoy
+  cluster: easydeploy
+
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+dynamic_resources:
+  cds_config:
+    resource_api_version: V3
+    api_config_source:
+      api_type: GRPC
+      transport_api_version: V3
+      grpc_services:
+        - envoy_grpc: { cluster_name: easydeploy_xds }
+  lds_config:
+    resource_api_version: V3
+    api_config_source:
+      api_type: GRPC
+      transport_api_version: V3
+      grpc_services:
+        - envoy_grpc: { cluster_name: easydeploy_xds }
+
+static_resources:
+  clusters:
+    # The only static cluster: the EasyDeploy control plane. host.docker.internal
+    # resolves to the host running the Go server when Envoy runs in Docker.
+    - name: easydeploy_xds
+      type: STRICT_DNS
+      # host.docker.internal may resolve to IPv6 only on Docker Desktop; ALL
+      # lets Envoy connect over whichever family resolves.
+      dns_lookup_family: ALL
+      connect_timeout: 5s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: easydeploy_xds
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: host.docker.internal
+                      port_value: 18000
