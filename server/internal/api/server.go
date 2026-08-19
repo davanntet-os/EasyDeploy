@@ -259,7 +259,7 @@ func (s *Server) Routes() http.Handler {
 				r.Put("/users/{id}/environments", s.handleSetUserEnvironments)
 				r.Delete("/users/{id}", s.handleDeleteUser)
 
-				// Environments (multi-host, Portainer-style). List + status are
+				// Environments (multi-host). List + status are
 				// in the shared group above; management is admin-only.
 				r.Post("/endpoints", s.handleCreateEndpoint)
 				r.Put("/endpoints/{id}", s.handleUpdateEndpoint)

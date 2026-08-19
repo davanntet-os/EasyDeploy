@@ -116,7 +116,7 @@ func (c *Client) EditContainer(ctx context.Context, id string, spec DeploySpec) 
 // :latest). Returns the new container ID.
 //
 // Docker containers are immutable: "updating" means replace. This is the
-// standard recreate pattern used by Portainer/Watchtower.
+// standard recreate pattern for updating a container in place.
 func (c *Client) Recreate(ctx context.Context, id, newImage, auth string) (string, error) {
 	info, err := c.cli.ContainerInspect(ctx, id)
 	if err != nil {

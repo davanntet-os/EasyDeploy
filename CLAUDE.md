@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 EasyDeploy is a Docker management platform with a built-in Envoy reverse proxy.
-Beyond Portainer-style container management, its distinguishing feature is that
+Beyond standard container management, its distinguishing feature is that
 deploying a container can automatically publish it on a **subdomain** (via a
 live Envoy **xDS control plane**) and expose it publicly through either the
 local **WiFi/NAT public IP** or a **cloud VM SSH reverse tunnel**.
@@ -83,7 +83,7 @@ Key cross-cutting facts:
   tunnels + public-IP detection) forwards raw TCP to Envoy's local port; it
   knows nothing about subdomains. Envoy still demuxes by Host header.
 
-## Multi-environment (Portainer-style multi-host)
+## Multi-environment (multi-host)
 
 EasyDeploy manages **multiple Docker hosts** from one instance (`internal/endpoint`).
 

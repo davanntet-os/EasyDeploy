@@ -6,14 +6,14 @@
 
 <p align="center"><em>Deploy a container, get a subdomain.</em></p>
 
-A Docker management platform (in the spirit of Portainer / Dockge / lazydocker)
+A self-hosted Docker management platform
 with a built-in **Envoy** reverse proxy that gives every deployed container its
 own **subdomain**, and one-click **public exposure** via either your WiFi/NAT
 public IP or a **cloud VM SSH reverse tunnel**.
 
 ## What makes it different
 
-- **Multi-host, Portainer-style** — manage several Docker daemons from one
+- **Multi-host management** — manage several Docker daemons from one
   place. Add remote environments (Docker API over TCP, optional mutual TLS) and
   switch between them; container/image/volume/network management targets the
   selected host.
