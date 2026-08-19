@@ -1812,130 +1812,258 @@ function Networks() {
   );
 }
 
+// registryKind maps a host to a recognizable provider label so cards read at a
+// glance instead of showing a bare hostname.
+function registryKind(url: string): string {
+  const h = url.replace(/^https?:\/\//, "").replace(/\/$/, "").toLowerCase();
+  if (/(^|\.)docker\.io$/.test(h) || h === "registry-1.docker.io" || h === "index.docker.io") return "Docker Hub";
+  if (h === "ghcr.io") return "GitHub";
+  if (h.endsWith("gitlab.com") || h.includes("gitlab")) return "GitLab";
+  if (h === "quay.io") return "Quay";
+  if (h.endsWith(".azurecr.io")) return "Azure";
+  if (h.endsWith(".pkg.dev") || h.endsWith("gcr.io")) return "Google";
+  if (h.includes("amazonaws.com")) return "Amazon ECR";
+  return "Private";
+}
+
+const matchRegistry = (r: Registry, q: string) =>
+  r.name.toLowerCase().includes(q) || r.url.toLowerCase().includes(q) || (r.username ?? "").toLowerCase().includes(q);
+
 function Registries() {
   const [list, err, reload] = useAsync<Registry[]>(() => api.registries(), []);
-  const [form, setForm] = useState({ name: "", url: "", username: "", password: "" });
-  const [testMsg, setTestMsg] = useState("");
-  const [browse, setBrowse] = useState<{ id: number; repos: string[] } | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [browse, setBrowse] = useState<Registry | null>(null);
+  const sp = useSearchPage(list ?? [], matchRegistry, 9);
 
-  const create = async (e: React.FormEvent) => {
+  if (err) return <Err msg={err} onRetry={reload} />;
+  if (!list) return <CardSkeleton />;
+
+  return (
+    <>
+      <div className="toolbar">
+        <button type="button" className="primary" onClick={() => setCreating(true)}>
+          <Icon.Plus size={15} /> <span>Add registry</span>
+        </button>
+        {list.length > 0 && <SearchInput value={sp.query} onChange={sp.setQuery} placeholder="Search registries…" />}
+        <span className="count">{sp.filtered.length} of {list.length} registr{list.length === 1 ? "y" : "ies"}</span>
+      </div>
+
+      {list.length === 0 ? (
+        <Empty
+          icon={Icon.Registry}
+          title="No registries yet"
+          hint="Add a private registry so pulls authenticate automatically — credentials are encrypted at rest."
+          action={<button type="button" className="primary" onClick={() => setCreating(true)}><Icon.Plus size={15} /> <span>Add registry</span></button>}
+        />
+      ) : sp.filtered.length === 0 ? (
+        <Empty icon={Icon.Search} title="No matches" hint="No registries match your search." />
+      ) : (
+        <>
+          <div className="reg-grid">
+            {sp.pageItems.map((r) => (
+              <RegistryCard key={r.id} reg={r} onBrowse={() => setBrowse(r)} onChanged={reload} />
+            ))}
+          </div>
+          <Pager page={sp.page} pageCount={sp.pageCount} onPage={sp.setPage} />
+        </>
+      )}
+
+      {creating && <RegistryCreateModal onClose={() => setCreating(false)} onCreated={() => { setCreating(false); reload(); }} />}
+      {browse && <RegistryCatalogModal reg={browse} onClose={() => setBrowse(null)} />}
+    </>
+  );
+}
+
+function RegistryCard({ reg, onBrowse, onChanged }: { reg: Registry; onBrowse: () => void; onChanged: () => void }) {
+  return (
+    <div className="reg-card">
+      <div className="reg-head">
+        <span className="reg-icon"><Icon.Registry size={18} /></span>
+        <div className="reg-title">
+          <strong>{reg.name}</strong>
+          <span className="mono muted reg-host">{reg.url}</span>
+        </div>
+        <span className="reg-kind">{registryKind(reg.url)}</span>
+      </div>
+      <div className="reg-body">
+        <div className="reg-field">
+          <span className="reg-label">User</span>
+          <span>{reg.username || <span className="muted">anonymous</span>}</span>
+        </div>
+        <div className="reg-field">
+          <span className="reg-label">Password</span>
+          <span className="muted"><Icon.Key size={12} /> encrypted</span>
+        </div>
+      </div>
+      <div className="reg-actions">
+        <button type="button" onClick={onBrowse}>
+          <Icon.Search size={14} /> <span>Browse repos</span>
+        </button>
+        <ActionButton
+          icon={Icon.Trash}
+          label="Delete"
+          variant="danger"
+          confirm={`Delete registry ${reg.name}?`}
+          success={`Deleted ${reg.name}`}
+          task={() => api.deleteRegistry(reg.id)}
+          onDone={onChanged}
+        />
+      </div>
+    </div>
+  );
+}
+
+function RegistryCreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const [f, setF] = useState({ name: "", url: "", username: "", password: "" });
+  const [busy, setBusy] = useState(false);
+  const [test, setTest] = useState<{ state: "idle" | "testing" | "ok" | "fail"; msg?: string }>({ state: "idle" });
+  const valid = f.name.trim() !== "" && f.url.trim() !== "";
+
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    try {
-      await api.createRegistry(form);
-      setForm({ name: "", url: "", username: "", password: "" });
-      reload();
-    } catch (e) {
-      toast("error", String(e));
-    }
+    if (!valid) return;
+    setBusy(true);
+    const res = await run(api.createRegistry(f), { success: `Added ${f.name}` });
+    setBusy(false);
+    if (res !== undefined) onCreated();
   };
-  const test = async () => {
-    setTestMsg("Testing…");
+  const testLogin = async () => {
+    setTest({ state: "testing" });
     try {
-      await api.testRegistry(form);
-      setTestMsg("✓ Login OK");
+      await api.testRegistry({ url: f.url, username: f.username, password: f.password });
+      setTest({ state: "ok", msg: "Login succeeded" });
     } catch (e) {
-      setTestMsg("✗ " + String((e as Error).message || e));
-    }
-  };
-  const openCatalog = async (id: number) => {
-    try {
-      const { repositories } = await api.registryCatalog(id);
-      setBrowse({ id, repos: repositories || [] });
-    } catch (e) {
-      toast("error", String(e));
+      setTest({ state: "fail", msg: String((e as Error).message || e) });
     }
   };
 
   return (
-    <div className="expose">
-      <section>
-        <h3>Add registry</h3>
-        <form className="form" onSubmit={create}>
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body narrow" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong><Icon.Registry size={15} /> Add registry</strong>
+          <button type="button" onClick={onClose} aria-label="Close"><Icon.Close size={16} /></button>
+        </div>
+        <form className="form modal-pad" onSubmit={submit}>
           <div className="row">
             <label>
               Name
-              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              <input autoFocus value={f.name} placeholder="my-ghcr" onChange={(e) => { setF({ ...f, name: e.target.value }); setTest({ state: "idle" }); }} />
             </label>
             <label>
-              Host (e.g. ghcr.io)
-              <input value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} />
+              Host
+              <input value={f.url} placeholder="ghcr.io" onChange={(e) => { setF({ ...f, url: e.target.value }); setTest({ state: "idle" }); }} />
             </label>
           </div>
           <div className="row">
             <label>
               Username
-              <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
+              <input value={f.username} placeholder="optional for public" onChange={(e) => { setF({ ...f, username: e.target.value }); setTest({ state: "idle" }); }} />
             </label>
             <label>
               Password / token
-              <input
-                type="password"
-                value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-              />
+              <input type="password" value={f.password} onChange={(e) => { setF({ ...f, password: e.target.value }); setTest({ state: "idle" }); }} />
             </label>
           </div>
-          <div className="actions">
-            <button type="submit">Save registry</button>
-            <button type="button" onClick={test}>
+          <p className="hint"><Icon.Key size={12} /> Encrypted with AES-256-GCM before storage — never returned by the API.</p>
+          {test.state !== "idle" && (
+            <div className={`reg-test reg-test-${test.state}`}>
+              {test.state === "testing" ? <Icon.Spinner size={14} /> : test.state === "ok" ? <Icon.Check2 size={14} /> : <Icon.Alert size={14} />}
+              <span>{test.state === "testing" ? "Testing login…" : test.msg}</span>
+            </div>
+          )}
+          <div className="actions" style={{ justifyContent: "space-between" }}>
+            <button type="button" onClick={testLogin} disabled={busy || test.state === "testing" || !f.url.trim()}>
               Test login
             </button>
-            {testMsg && <span className="muted">{testMsg}</span>}
-          </div>
-          <p className="hint">Passwords are encrypted (AES-GCM) before storage and never returned by the API.</p>
-        </form>
-      </section>
-
-      <section>
-        <h3>Configured registries</h3>
-        {err && <Err msg={err} onRetry={reload} />}
-        <div className="table-wrap"><table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Host</th>
-              <th>User</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {list?.map((r) => (
-              <tr key={r.id}>
-                <td>{r.name}</td>
-                <td className="muted">{r.url}</td>
-                <td className="muted">{r.username || "—"}</td>
-                <td className="actions">
-                  <button onClick={() => openCatalog(r.id)}>Browse</button>
-                  <button className="danger" onClick={() => api.deleteRegistry(r.id).then(reload)}>
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table></div>
-        {browse && (
-          <div className="modal" onClick={() => setBrowse(null)}>
-            <div className="modal-body" onClick={(e) => e.stopPropagation()}>
-              <div className="modal-head">
-                <strong>Repositories</strong>
-                <button onClick={() => setBrowse(null)}>Close</button>
-              </div>
-              <div className="logs">
-                {browse.repos.length === 0 ? (
-                  <p className="muted">No repositories (or registry does not support _catalog).</p>
-                ) : (
-                  <ul>
-                    {browse.repos.map((repo) => (
-                      <li key={repo}>{repo}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+            <div className="actions">
+              <button type="button" onClick={onClose} disabled={busy}>Cancel</button>
+              <button type="submit" className="primary" disabled={busy || !valid}>
+                {busy ? <Icon.Spinner size={15} /> : <Icon.Plus size={15} />}
+                <span>Add registry</span>
+              </button>
             </div>
           </div>
-        )}
-      </section>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// RegistryCatalogModal browses a registry: it lists repositories, and clicking
+// one loads its tags inline.
+function RegistryCatalogModal({ reg, onClose }: { reg: Registry; onClose: () => void }) {
+  const [repos, err, reload] = useAsync<string[]>(() => api.registryCatalog(reg.id).then((r) => r.repositories ?? []), []);
+  const [query, setQuery] = useState("");
+  const [tags, setTags] = useState<Record<string, string[] | "loading">>({});
+
+  const toggle = async (repo: string) => {
+    if (tags[repo]) {
+      setTags((t) => { const n = { ...t }; delete n[repo]; return n; });
+      return;
+    }
+    setTags((t) => ({ ...t, [repo]: "loading" }));
+    try {
+      const { tags: ts } = await api.registryTags(reg.id, repo);
+      setTags((t) => ({ ...t, [repo]: ts ?? [] }));
+    } catch (e) {
+      toast("error", String(e));
+      setTags((t) => { const n = { ...t }; delete n[repo]; return n; });
+    }
+  };
+
+  const shown = (repos ?? []).filter((r) => r.toLowerCase().includes(query.toLowerCase()));
+
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong><Icon.Registry size={15} /> {reg.name} · repositories</strong>
+          <button type="button" onClick={onClose} aria-label="Close"><Icon.Close size={16} /></button>
+        </div>
+        <div className="modal-pad">
+          {err ? (
+            <Err msg={err} onRetry={reload} />
+          ) : !repos ? (
+            <Loading />
+          ) : repos.length === 0 ? (
+            <Empty icon={Icon.Box} title="No repositories" hint="This registry is empty or does not support the _catalog API." />
+          ) : (
+            <>
+              {repos.length > 6 && (
+                <div className="reg-cat-search">
+                  <SearchInput value={query} onChange={setQuery} placeholder="Filter repositories…" />
+                </div>
+              )}
+              <ul className="reg-repos">
+                {shown.map((repo) => {
+                  const t = tags[repo];
+                  return (
+                    <li key={repo} className="reg-repo">
+                      <button type="button" className="reg-repo-head" onClick={() => toggle(repo)}>
+                        <Icon.Chevron size={14} className={t ? "chev-open" : ""} />
+                        <Icon.Box size={14} />
+                        <span className="mono">{repo}</span>
+                      </button>
+                      {t === "loading" && <div className="reg-tags muted"><Icon.Spinner size={13} /> loading tags…</div>}
+                      {Array.isArray(t) && (
+                        <div className="reg-tags">
+                          {t.length === 0 ? (
+                            <span className="muted">no tags</span>
+                          ) : (
+                            t.map((tag) => <span key={tag} className="tag-chip mono">{tag}</span>)
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+                {shown.length === 0 && <p className="muted">No repositories match “{query}”.</p>}
+              </ul>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
