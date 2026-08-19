@@ -1,4 +1,10 @@
-# EasyDeploy
+<p align="center">
+  <img src="assets/logo.svg" width="96" alt="EasyDeploy logo">
+</p>
+
+<h1 align="center">EasyDeploy</h1>
+
+<p align="center"><em>Deploy a container, get a subdomain.</em></p>
 
 A Docker management platform (in the spirit of Portainer / Dockge / lazydocker)
 with a built-in **Envoy** reverse proxy that gives every deployed container its

@@ -101,7 +101,7 @@ function Login({ onLogin }: { onLogin: () => void }) {
     <div className="login">
       <form className="login-card" onSubmit={submit}>
         <span className="brand-mark login-mark">
-          <Icon.Rocket size={22} />
+          <Icon.Logo size={26} />
         </span>
         <h1>EasyDeploy</h1>
         <p className="muted">Sign in to manage your containers.</p>
@@ -207,7 +207,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">
-            <Icon.Rocket size={18} />
+            <Icon.Logo size={20} />
           </span>
           <h1>EasyDeploy</h1>
         </div>
@@ -1491,15 +1491,109 @@ function Routes() {
   );
 }
 
+// ExposeDiagram is a GCP-style architecture picture: internet traffic enters
+// through one of the two exposure paths, hits the Envoy load balancer, and is
+// fanned out (routed by subdomain, round-robined) to the replica containers.
+// `active` softly highlights the path for the option the user is hovering.
+function ExposeDiagram({ active }: { active: "ip" | "tunnel" | null }) {
+  const ipOn = active !== "tunnel";
+  const tunOn = active !== "ip";
+  return (
+    <svg className="expose-svg" viewBox="0 0 980 340" role="img" preserveAspectRatio="xMidYMid meet"
+      aria-label="Internet traffic flows through a public entry point to the Envoy load balancer, which routes by subdomain to your replica containers.">
+      <defs>
+        <marker id="exp-ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L7,3 L0,6 Z" fill="var(--muted)" />
+        </marker>
+        <marker id="exp-ar-a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L7,3 L0,6 Z" fill="var(--accent)" />
+        </marker>
+      </defs>
+
+      {/* flow arrows (drawn first so nodes sit on top) */}
+      <g fill="none" strokeWidth="2">
+        {/* internet -> entry points */}
+        <path d="M150 150 C 190 120, 200 104, 232 104" stroke="var(--border-strong)" markerEnd="url(#exp-ar)" opacity={ipOn ? 1 : 0.25} />
+        <path d="M150 190 C 190 220, 200 236, 232 236" stroke="var(--border-strong)" markerEnd="url(#exp-ar)" opacity={tunOn ? 1 : 0.25} />
+        {/* entry points -> envoy */}
+        <path d="M432 104 C 480 104, 486 150, 520 158" stroke={ipOn ? "var(--accent)" : "var(--border-strong)"} markerEnd={ipOn ? "url(#exp-ar-a)" : "url(#exp-ar)"} opacity={ipOn ? 1 : 0.25} />
+        <path d="M432 236 C 480 236, 486 190, 520 182" stroke={tunOn ? "var(--accent)" : "var(--border-strong)"} markerEnd={tunOn ? "url(#exp-ar-a)" : "url(#exp-ar)"} opacity={tunOn ? 1 : 0.25} />
+        {/* envoy -> replicas */}
+        <path d="M690 150 C 730 120, 740 96, 772 90" stroke="var(--accent)" markerEnd="url(#exp-ar-a)" />
+        <path d="M690 170 L 772 170" stroke="var(--accent)" markerEnd="url(#exp-ar-a)" />
+        <path d="M690 190 C 730 220, 740 244, 772 250" stroke="var(--accent)" markerEnd="url(#exp-ar-a)" />
+      </g>
+
+      {/* Internet */}
+      <g>
+        <rect x="16" y="126" width="130" height="88" rx="12" fill="var(--panel-2)" stroke="var(--border)" />
+        <circle cx="52" cy="164" r="14" fill="none" stroke="var(--muted)" strokeWidth="1.6" />
+        <path d="M38 164h28M52 150c4 4 6 9 6 14s-2 10-6 14c-4-4-6-9-6-14s2-10 6-14Z" fill="none" stroke="var(--muted)" strokeWidth="1.6" />
+        <text x="81" y="160" className="d-t">Internet</text>
+        <text x="81" y="178" className="d-s">your users</text>
+        <text x="81" y="196" className="d-s">:80 / :443</text>
+      </g>
+
+      {/* Option 1 — Public IP */}
+      <g opacity={ipOn ? 1 : 0.4}>
+        <rect x="232" y="72" width="200" height="64" rx="12" fill="var(--panel-2)" stroke={ipOn ? "var(--accent)" : "var(--border)"} />
+        <text x="252" y="100" className="d-t">WiFi / NAT public IP</text>
+        <text x="252" y="119" className="d-s">router forwards port 80 → here</text>
+      </g>
+
+      {/* Option 2 — Cloud VM */}
+      <g opacity={tunOn ? 1 : 0.4}>
+        <rect x="232" y="204" width="200" height="64" rx="12" fill="var(--panel-2)" stroke={tunOn ? "var(--accent)" : "var(--border)"} />
+        <text x="252" y="230" className="d-t">Cloud VM</text>
+        <text x="252" y="249" className="d-s">SSH reverse tunnel · no router</text>
+        <text x="252" y="262" className="d-s">public IP, always reachable</text>
+      </g>
+
+      {/* Envoy load balancer */}
+      <g>
+        <rect x="520" y="112" width="170" height="116" rx="14" fill="color-mix(in srgb, var(--accent) 12%, var(--panel))" stroke="var(--accent)" strokeWidth="1.6" />
+        <text x="605" y="146" className="d-t d-c" fill="var(--accent-strong)">Envoy</text>
+        <text x="605" y="166" className="d-s d-c">load balancer</text>
+        <text x="605" y="188" className="d-s d-c">routes by subdomain</text>
+        <text x="605" y="204" className="d-s d-c">app.you.com → cluster</text>
+        <text x="605" y="220" className="d-s d-c">round-robin ↻</text>
+      </g>
+
+      {/* Replica containers */}
+      {[
+        { y: 62, i: 0 },
+        { y: 146, i: 1 },
+        { y: 230, i: 2 },
+      ].map(({ y, i }) => (
+        <g key={i}>
+          <rect x="772" y={y} width="192" height="56" rx="11" fill="var(--panel-2)" stroke="var(--border)" />
+          <rect x="788" y={y + 18} width="20" height="20" rx="4" fill="none" stroke="var(--ok)" strokeWidth="1.6" />
+          <text x="820" y={y + 27} className="d-t">app-{i}</text>
+          <text x="820" y={y + 44} className="d-s">replica container</text>
+        </g>
+      ))}
+      <text x="868" y="322" className="d-s d-c">N replicas · scaled by the service</text>
+    </svg>
+  );
+}
+
 function Expose() {
   const [ip, setIp] = useState<string>("");
+  const [detecting, setDetecting] = useState(false);
+  const [hover, setHover] = useState<"ip" | "tunnel" | null>(null);
   const [tunnels, err, reload] = useAsync<Tunnel[]>(() => api.tunnels(), []);
   const [form, setForm] = useState({ name: "", sshHost: "", sshPort: 22, sshUser: "root", remotePort: 80, localPort: 10000 });
+
+  const detect = () => {
+    setDetecting(true);
+    api.publicIP().then((r) => setIp(r.ip)).catch((e) => toast("error", String(e))).finally(() => setDetecting(false));
+  };
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       await api.createTunnel({ kind: "ssh", ...form });
+      setForm({ name: "", sshHost: "", sshPort: 22, sshUser: "root", remotePort: 80, localPort: 10000 });
       reload();
     } catch (err) {
       toast("error", String(err));
@@ -1508,93 +1602,141 @@ function Expose() {
 
   return (
     <div className="expose">
-      <section>
-        <h3>Option 1 — WiFi / NAT public IP</h3>
-        <button onClick={() => api.publicIP().then((r) => setIp(r.ip)).catch((e) => toast("error", String(e)))}>
-          Detect public IP
-        </button>
-        {ip && (
-          <p>
-            Public IP: <code>{ip}</code> — forward port 80 on your router to this machine.
+      <div className="panel expose-hero">
+        <div className="expose-hero-head">
+          <h3>How exposure works</h3>
+          <p className="muted">
+            EasyDeploy already routes each service to a subdomain through its built-in Envoy load balancer.
+            To make those subdomains reachable from the public internet, point traffic at Envoy one of two ways below.
           </p>
-        )}
-      </section>
+        </div>
+        <ExposeDiagram active={hover} />
+      </div>
 
-      <section>
-        <h3>Option 2 — Cloud VM SSH reverse tunnel</h3>
-        <form className="form" onSubmit={create}>
-          <div className="row">
-            <label>
-              Name
-              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </label>
-            <label>
-              SSH host
-              <input value={form.sshHost} onChange={(e) => setForm({ ...form, sshHost: e.target.value })} />
-            </label>
+      <div className="expose-grid">
+        {/* Option 1 */}
+        <div className="panel expose-card" onMouseEnter={() => setHover("ip")} onMouseLeave={() => setHover(null)}>
+          <div className="expose-card-head">
+            <span className="expose-num">1</span>
+            <div>
+              <h4>WiFi / NAT public IP</h4>
+              <p className="muted">Best when this machine has a routable IP or you can port-forward on your router.</p>
+            </div>
           </div>
-          <div className="row">
-            <label>
-              SSH user
-              <input value={form.sshUser} onChange={(e) => setForm({ ...form, sshUser: e.target.value })} />
-            </label>
-            <label>
-              SSH port
-              <input type="number" value={form.sshPort} onChange={(e) => setForm({ ...form, sshPort: Number(e.target.value) })} />
-            </label>
-          </div>
-          <div className="row">
-            <label>
-              Remote port (on VM)
-              <input type="number" value={form.remotePort} onChange={(e) => setForm({ ...form, remotePort: Number(e.target.value) })} />
-            </label>
-            <label>
-              Local port (Envoy)
-              <input type="number" value={form.localPort} onChange={(e) => setForm({ ...form, localPort: Number(e.target.value) })} />
-            </label>
-          </div>
-          <button type="submit">Add tunnel</button>
-        </form>
+          <ol className="expose-steps">
+            <li>Detect your current public IP.</li>
+            <li>On your router, forward external port <code>80</code> (and <code>443</code>) to this machine.</li>
+            <li>Point your domain's DNS at that IP.</li>
+          </ol>
+          <button className="primary" onClick={detect} disabled={detecting}>
+            {detecting ? <Icon.Spinner /> : <Icon.Globe />}
+            <span>{detecting ? "Detecting…" : "Detect public IP"}</span>
+          </button>
+          {ip && (
+            <div className="expose-result">
+              <span className="muted">Public IP</span>
+              <code>{ip}</code>
+              <span className="muted">— forward port 80 on your router to this machine.</span>
+            </div>
+          )}
+        </div>
 
+        {/* Option 2 */}
+        <div className="panel expose-card" onMouseEnter={() => setHover("tunnel")} onMouseLeave={() => setHover(null)}>
+          <div className="expose-card-head">
+            <span className="expose-num">2</span>
+            <div>
+              <h4>Cloud VM SSH reverse tunnel</h4>
+              <p className="muted">Best behind NAT/CGNAT — a cloud VM's public IP forwards to your local Envoy, no router config.</p>
+            </div>
+          </div>
+          <form className="form" onSubmit={create}>
+            <div className="row">
+              <label>
+                Name
+                <input value={form.name} placeholder="prod-tunnel" onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              </label>
+              <label>
+                SSH host
+                <input value={form.sshHost} placeholder="vm.example.com" onChange={(e) => setForm({ ...form, sshHost: e.target.value })} />
+              </label>
+            </div>
+            <div className="row">
+              <label>
+                SSH user
+                <input value={form.sshUser} onChange={(e) => setForm({ ...form, sshUser: e.target.value })} />
+              </label>
+              <label>
+                SSH port
+                <input type="number" value={form.sshPort} onChange={(e) => setForm({ ...form, sshPort: Number(e.target.value) })} />
+              </label>
+            </div>
+            <div className="row">
+              <label>
+                Remote port <span className="muted">(on VM)</span>
+                <input type="number" value={form.remotePort} onChange={(e) => setForm({ ...form, remotePort: Number(e.target.value) })} />
+              </label>
+              <label>
+                Local port <span className="muted">(Envoy)</span>
+                <input type="number" value={form.localPort} onChange={(e) => setForm({ ...form, localPort: Number(e.target.value) })} />
+              </label>
+            </div>
+            <button type="submit" className="primary">
+              <Icon.Plus />
+              <span>Add tunnel</span>
+            </button>
+          </form>
+        </div>
+      </div>
+
+      {/* Tunnels list */}
+      <div className="panel expose-tunnels">
+        <div className="panel-head">
+          <h3>SSH tunnels</h3>
+        </div>
         {err && <Err msg={err} onRetry={reload} />}
-        <div className="table-wrap"><table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Target</th>
-              <th>Status</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {tunnels?.map((t) => (
-              <tr key={t.id}>
-                <td>{t.name}</td>
-                <td className="muted">
-                  {t.sshUser}@{t.sshHost}:{t.remotePort} → :{t.localPort}
-                </td>
-                <td>
-                  <span className={`badge ${t.running ? "running" : "exited"}`}>
-                    {t.running ? "running" : "stopped"}
-                  </span>
-                </td>
-                <td className="actions">
-                  {t.running ? (
-                    <button onClick={() => api.stopTunnel(t.id).then(reload)}>Stop</button>
-                  ) : (
-                    <button onClick={() => api.startTunnel(t.id).then(reload).catch((e) => toast("error", String(e)))}>
-                      Start
-                    </button>
-                  )}
-                  <button className="danger" onClick={() => api.deleteTunnel(t.id).then(reload)}>
-                    Delete
-                  </button>
-                </td>
+        {!err && tunnels && tunnels.length === 0 ? (
+          <Empty icon={Icon.Route} title="No tunnels yet" hint="Add a Cloud VM tunnel above to expose Envoy through a VM's public IP." />
+        ) : (
+          <div className="table-wrap"><table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Target</th>
+                <th>Status</th>
+                <th></th>
               </tr>
-            ))}
-          </tbody>
-        </table></div>
-      </section>
+            </thead>
+            <tbody>
+              {tunnels?.map((t) => (
+                <tr key={t.id}>
+                  <td className="strong">{t.name}</td>
+                  <td className="muted mono">
+                    {t.sshUser}@{t.sshHost}:{t.remotePort} → :{t.localPort}
+                  </td>
+                  <td>
+                    <span className={`badge ${t.running ? "running" : "exited"}`}>
+                      {t.running ? "running" : "stopped"}
+                    </span>
+                  </td>
+                  <td className="actions">
+                    {t.running ? (
+                      <button onClick={() => api.stopTunnel(t.id).then(reload)}>Stop</button>
+                    ) : (
+                      <button onClick={() => api.startTunnel(t.id).then(reload).catch((e) => toast("error", String(e)))}>
+                        Start
+                      </button>
+                    )}
+                    <button className="danger" onClick={() => api.deleteTunnel(t.id).then(reload)}>
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table></div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1986,7 +2128,7 @@ function Users() {
               <tr>
                 <th>User</th>
                 <th>Role</th>
-                <th>Quota (CPU / RAM)</th>
+                <th>Local quota</th>
                 <th></th>
               </tr>
             </thead>
@@ -2081,86 +2223,58 @@ function UserCreateModal({ onClose, onCreated }: { onClose: () => void; onCreate
 
 function UserRow({ user, onChanged }: { user: User; onChanged: () => void }) {
   const isAdmin = user.role === "admin";
-  const [cpuCores, setCpuCores] = useState(user.cpuQuotaMilli / 1000);
-  const [memMB, setMemMB] = useState(user.memQuotaMB);
-  const [pwBusy, pwRun] = useAction();
-  const [roleBusy, roleRun] = useAction();
-  const [envOpen, setEnvOpen] = useState(false);
-
-  const changeRole = (role: Role) =>
-    roleRun(api.setUserRole(user.id, role), { success: `${user.username} is now ${role}` }).then((r) => r !== undefined && onChanged());
-
-  const resetPassword = async () => {
-    const p = window.prompt(`New password for ${user.username} (at least 6 characters):`);
-    if (p === null) return;
-    if (p.length < 6) {
-      toast("error", "Password must be at least 6 characters");
-      return;
-    }
-    await pwRun(api.resetPassword(user.id, p), { success: `Password reset for ${user.username}` });
-  };
-
+  const [manage, setManage] = useState(false);
   return (
     <tr>
       <td className="strong">{user.username}</td>
       <td>
-        <select className="role-select" value={user.role} disabled={roleBusy} onChange={(e) => changeRole(e.target.value as Role)}>
-          <option value="member">member</option>
-          <option value="admin">admin</option>
-        </select>
+        <span className={`role-badge ${isAdmin ? "role-admin" : "role-member"}`}>{user.role}</span>
       </td>
-      <td>
+      <td className="muted">
         {isAdmin ? (
-          <span className="muted">unlimited</span>
+          "unlimited"
         ) : (
-          <span className="quota-edit">
-            <input type="number" step="0.1" min="0" value={cpuCores} onChange={(e) => setCpuCores(Number(e.target.value))} />
-            <span className="muted">cores</span>
-            <input type="number" min="0" value={memMB} onChange={(e) => setMemMB(Number(e.target.value))} />
-            <span className="muted">MB</span>
-          </span>
+          <>
+            {formatCores(user.cpuQuotaMilli)} cores <span className="dot-sep">·</span> {user.memQuotaMB} MB
+          </>
         )}
       </td>
       <td className="actions">
-        {!isAdmin && (
-          <ActionButton
-            icon={Icon.Check2}
-            label="Save"
-            success={`Updated ${user.username}'s quota`}
-            task={() => api.updateUserQuota(user.id, Math.round(cpuCores * 1000), memMB)}
-            onDone={onChanged}
+        <button type="button" className="btn-manage" onClick={() => setManage(true)}>
+          <Icon.Edit size={14} /> <span>Manage</span>
+        </button>
+        {manage && (
+          <UserManageModal
+            user={user}
+            onClose={() => setManage(false)}
+            onChanged={onChanged}
           />
         )}
-        {!isAdmin && (
-          <button type="button" className="btn-icon" title="Assign environments" onClick={() => setEnvOpen(true)}>
-            <Icon.Server size={15} />
-          </button>
-        )}
-        <button type="button" className="btn-icon" title="Reset password" onClick={resetPassword} disabled={pwBusy}>
-          {pwBusy ? <Icon.Spinner size={15} /> : <Icon.Key size={15} />}
-        </button>
-        <ActionButton
-          icon={Icon.Trash}
-          title="Delete user"
-          variant="danger"
-          confirm={`Delete ${user.username}?`}
-          success={`Deleted ${user.username}`}
-          task={() => api.deleteUser(user.id)}
-          onDone={onChanged}
-        />
-        {envOpen && <UserEnvModal user={user} onClose={() => setEnvOpen(false)} />}
       </td>
     </tr>
   );
 }
 
-// UserEnvModal lets an admin grant a member access to remote environments, each
-// with its own CPU/RAM quota.
+const formatCores = (milli: number) => {
+  const c = milli / 1000;
+  return Number.isInteger(c) ? String(c) : c.toFixed(1);
+};
+
+// UserManageModal is the single place to manage everything about a user: role,
+// per-environment access + quota (local host + each remote), password, and
+// deletion. Quota is per environment, so it can never be edited as one number.
 type EnvGrantForm = { checked: boolean; cpu: number; mem: number };
-function UserEnvModal({ user, onClose }: { user: User; onClose: () => void }) {
+function UserManageModal({ user, onClose, onChanged }: { user: User; onClose: () => void; onChanged: () => void }) {
   const [envs] = useAsync<Endpoint[]>(() => api.endpoints(), []);
+  const [role, setRole] = useState<Role>(user.role);
+  const [localCpu, setLocalCpu] = useState(user.cpuQuotaMilli / 1000);
+  const [localMem, setLocalMem] = useState(user.memQuotaMB);
   const [grants, setGrants] = useState<Record<number, EnvGrantForm> | null>(null);
+  const [newPw, setNewPw] = useState("");
+  const [pwBusy, pwRun] = useAction();
   const [busy, setBusy] = useState(false);
+  const isMember = role === "member";
+
   useEffect(() => {
     api.getUserEnvironments(user.id).then((gs) => {
       const map: Record<number, EnvGrantForm> = {};
@@ -2172,69 +2286,178 @@ function UserEnvModal({ user, onClose }: { user: User; onClose: () => void }) {
   const remotes = (envs ?? []).filter((e) => !e.local);
   const g = (id: number): EnvGrantForm => grants?.[id] ?? { checked: false, cpu: 1, mem: 512 };
   const patch = (id: number, p: Partial<EnvGrantForm>) => setGrants((cur) => ({ ...(cur ?? {}), [id]: { ...g(id), ...p } }));
+
+  const setPassword = async () => {
+    if (newPw.length < 6) {
+      toast("error", "Password must be at least 6 characters");
+      return;
+    }
+    const r = await pwRun(api.resetPassword(user.id, newPw), { success: `Password reset for ${user.username}` });
+    if (r !== undefined) setNewPw("");
+  };
+
+  // Save applies role, then (for members) the local quota and the remote
+  // environment grants together, so the modal is one atomic "manage" action.
   const save = async () => {
-    if (!grants) return;
     setBusy(true);
-    const payload = remotes
-      .filter((e) => grants[e.id]?.checked)
-      .map((e) => ({ endpointId: e.id, cpuQuotaMilli: Math.round(g(e.id).cpu * 1000), memQuotaMB: g(e.id).mem }));
-    const ok = await run(api.setUserEnvironments(user.id, payload), { success: `Updated ${user.username}'s environments` });
-    setBusy(false);
-    if (ok !== undefined) onClose();
+    try {
+      if (role !== user.role) {
+        await api.setUserRole(user.id, role);
+      }
+      if (role === "member") {
+        await api.updateUserQuota(user.id, Math.round(localCpu * 1000), localMem);
+        const payload = remotes
+          .filter((e) => grants?.[e.id]?.checked)
+          .map((e) => ({ endpointId: e.id, cpuQuotaMilli: Math.round(g(e.id).cpu * 1000), memQuotaMB: g(e.id).mem }));
+        await api.setUserEnvironments(user.id, payload);
+      }
+      toast("success", `Saved ${user.username}`);
+      onChanged();
+      onClose();
+    } catch (e) {
+      toast("error", String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const del = async () => {
+    if (!window.confirm(`Delete ${user.username}? This cannot be undone.`)) return;
+    const r = await run(api.deleteUser(user.id), { success: `Deleted ${user.username}` });
+    if (r !== undefined) {
+      onChanged();
+      onClose();
+    }
   };
 
   return (
     <div className="modal" onClick={onClose}>
-      <div className="modal-body narrow" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-body" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <strong>
-            <Icon.Server size={15} /> {user.username} · environments
+            <Icon.Users size={15} /> Manage · {user.username}
           </strong>
           <button type="button" onClick={onClose} aria-label="Close">
             <Icon.Close size={16} />
           </button>
         </div>
-        <div className="modal-pad">
-          <p className="hint">Grant access to remote environments and set a per-environment quota. The local host is always available (its quota is on the Users row).</p>
-          {!grants || !envs ? (
-            <Loading />
-          ) : remotes.length === 0 ? (
-            <p className="muted">No remote environments yet — add one in the Environments tab.</p>
-          ) : (
-            <ul className="check-list">
-              {remotes.map((e) => {
-                const gf = g(e.id);
-                return (
-                  <li key={e.id} className="env-grant">
-                    <label className="check">
-                      <input type="checkbox" checked={gf.checked} onChange={(ev) => patch(e.id, { checked: ev.target.checked })} />
-                      <span className="strong">{e.name}</span>
-                      <span className="muted mono">{e.host}</span>
-                    </label>
-                    {gf.checked && (
-                      <div className="env-grant-quota">
-                        <label>
-                          CPU (cores)
-                          <input type="number" step="0.1" min="0" value={gf.cpu} onChange={(ev) => patch(e.id, { cpu: Number(ev.target.value) })} />
+        <div className="modal-pad user-manage">
+          {/* Role */}
+          <section className="um-section">
+            <h4>Role</h4>
+            <div className="seg">
+              {(["member", "admin"] as Role[]).map((r) => (
+                <button
+                  key={r}
+                  type="button"
+                  className={role === r ? "seg-on" : ""}
+                  onClick={() => setRole(r)}
+                >
+                  {r}
+                </button>
+              ))}
+            </div>
+            <p className="hint">
+              {isMember
+                ? "Members are quota-bound and see only resources they own."
+                : "Admins have unlimited quota and full access to every environment. (The last admin can't be demoted.)"}
+            </p>
+          </section>
+
+          {/* Quota & environments — members only */}
+          {isMember && (
+            <section className="um-section">
+              <h4>Access &amp; quota per environment</h4>
+              <p className="hint">Each environment has its own CPU/RAM quota. The local host is always available; grant remote hosts below.</p>
+
+              <div className="env-grant um-local">
+                <div className="check">
+                  <Icon.Server size={15} />
+                  <span className="strong">Local host</span>
+                  <span className="muted">always available</span>
+                </div>
+                <div className="env-grant-quota">
+                  <label>
+                    CPU (cores)
+                    <input type="number" step="0.1" min="0" value={localCpu} onChange={(e) => setLocalCpu(Number(e.target.value))} />
+                  </label>
+                  <label>
+                    Memory (MB)
+                    <input type="number" min="0" value={localMem} onChange={(e) => setLocalMem(Number(e.target.value))} />
+                  </label>
+                </div>
+              </div>
+
+              {!grants || !envs ? (
+                <Loading />
+              ) : remotes.length === 0 ? (
+                <p className="muted">No remote environments yet — add one in the Environments tab.</p>
+              ) : (
+                <ul className="check-list">
+                  {remotes.map((e) => {
+                    const gf = g(e.id);
+                    return (
+                      <li key={e.id} className="env-grant">
+                        <label className="check">
+                          <input type="checkbox" checked={gf.checked} onChange={(ev) => patch(e.id, { checked: ev.target.checked })} />
+                          <span className="strong">{e.name}</span>
+                          <span className="muted mono">{e.host}</span>
                         </label>
-                        <label>
-                          Memory (MB)
-                          <input type="number" min="0" value={gf.mem} onChange={(ev) => patch(e.id, { mem: Number(ev.target.value) })} />
-                        </label>
-                      </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+                        {gf.checked && (
+                          <div className="env-grant-quota">
+                            <label>
+                              CPU (cores)
+                              <input type="number" step="0.1" min="0" value={gf.cpu} onChange={(ev) => patch(e.id, { cpu: Number(ev.target.value) })} />
+                            </label>
+                            <label>
+                              Memory (MB)
+                              <input type="number" min="0" value={gf.mem} onChange={(ev) => patch(e.id, { mem: Number(ev.target.value) })} />
+                            </label>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
           )}
-          <div className="actions" style={{ justifyContent: "flex-end", marginTop: 14 }}>
+
+          {/* Password */}
+          <section className="um-section">
+            <h4>Reset password</h4>
+            <div className="um-pw">
+              <input
+                type="password"
+                value={newPw}
+                placeholder="New password (min 6 chars)"
+                onChange={(e) => setNewPw(e.target.value)}
+              />
+              <button type="button" onClick={setPassword} disabled={pwBusy || newPw.length < 6}>
+                {pwBusy ? <Icon.Spinner size={15} /> : <Icon.Key size={15} />}
+                <span>Set password</span>
+              </button>
+            </div>
+          </section>
+
+          {/* Danger */}
+          <section className="um-section um-danger">
+            <div>
+              <h4>Delete user</h4>
+              <p className="hint">Removes the account. Their containers/services are not deleted.</p>
+            </div>
+            <button type="button" className="danger" onClick={del}>
+              <Icon.Trash size={15} /> <span>Delete</span>
+            </button>
+          </section>
+
+          <div className="actions" style={{ justifyContent: "flex-end", marginTop: 4 }}>
             <button type="button" onClick={onClose} disabled={busy}>
               Cancel
             </button>
-            <button type="button" className="primary" onClick={save} disabled={busy || !grants}>
+            <button type="button" className="primary" onClick={save} disabled={busy || (isMember && !grants)}>
               {busy ? <Icon.Spinner size={15} /> : <Icon.Check2 size={15} />}
-              <span>Save</span>
+              <span>Save changes</span>
             </button>
           </div>
         </div>

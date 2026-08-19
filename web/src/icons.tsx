@@ -24,6 +24,27 @@ function Svg({ size = 16, className, children }: IconProps & { children: React.R
 }
 
 export const Icon = {
+  // Logo — an original mark for EasyDeploy: a single source node at the base
+  // fans up to three nodes, reading at once as "deploy upward" and
+  // "load-balance / route to many". Pure geometry, drawn from scratch.
+  Logo: ({ size = 20, className }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      {/* fan-out branches from the source hub to the three nodes */}
+      <path
+        d="M12 17.2 L6.2 8.4 M12 17.2 L12 6 M12 17.2 L17.8 8.4"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      {/* three destination nodes (replicas / subdomains) */}
+      <circle cx="6" cy="7" r="2.1" fill="currentColor" />
+      <circle cx="12" cy="5" r="2.1" fill="currentColor" />
+      <circle cx="18" cy="7" r="2.1" fill="currentColor" />
+      {/* the source hub (the service being deployed) */}
+      <circle cx="12" cy="18.5" r="2.7" fill="currentColor" />
+    </svg>
+  ),
   Play: (p: IconProps) => (
     <Svg {...p}>
       <polygon points="6 4 20 12 6 20 6 4" />
