@@ -2,7 +2,7 @@
 # this Dockerfile can build both the web UI and the Go server and ship them
 # in one image.
 #
-# The SQLite driver is pure Go (modernc.org/sqlite), so the server builds
+# Persistence is PostgreSQL via the pure-Go pgx driver, so the server builds
 # fully static with CGO disabled into a minimal distroless image.
 
 # 1. Build the frontend.

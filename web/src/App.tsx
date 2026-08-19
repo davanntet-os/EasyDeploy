@@ -3301,8 +3301,8 @@ function ServiceEditor({
               ]}
             />
             {source === "image" ? (
-              <Field label="Image" required help="Any image reference — pulls with a matching registry's credentials if configured">
-                <input required value={f.image} placeholder="nginx:alpine" onChange={(e) => update({ image: e.target.value })} />
+              <Field label="Image" required help="No registry to pick — auth is automatic. Include the host for private images (e.g. ghcr.io/you/app:tag) and EasyDeploy matches it to a configured registry's credentials. Public images like nginx:alpine need nothing.">
+                <input required value={f.image} placeholder="nginx:alpine  ·  ghcr.io/you/app:tag" onChange={(e) => update({ image: e.target.value })} />
               </Field>
             ) : (
               <>
