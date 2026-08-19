@@ -162,7 +162,12 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	id, err := cli.CreateNetwork(r.Context(), req.Name, req.Driver)
+	// Stamp the creator as owner so members manage only their own networks.
+	labels := map[string]string{docker.LabelManaged: "true"}
+	if owner := ownerScope(r); owner != "" {
+		labels[docker.LabelOwner] = owner
+	}
+	id, err := cli.CreateNetwork(r.Context(), req.Name, req.Driver, labels)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return
@@ -248,6 +253,13 @@ func (s *Server) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	// Stamp the creator as owner so members manage only their own volumes.
+	if owner := ownerScope(r); owner != "" {
+		if req.Labels == nil {
+			req.Labels = map[string]string{}
+		}
+		req.Labels[docker.LabelOwner] = owner
 	}
 	v, err := cli.CreateVolume(r.Context(), req.Name, req.Driver, req.Labels)
 	if err != nil {
@@ -372,7 +384,8 @@ func (s *Server) handleDownloadVolume(w http.ResponseWriter, r *http.Request) {
 // --- registries ---
 
 func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
-	list, err := s.registries.List(r.Context())
+	// Members see only their own registries; admins see all.
+	list, err := s.registries.List(r.Context(), ownerScope(r))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -391,7 +404,7 @@ func (s *Server) handleCreateRegistry(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	reg, err := s.registries.Create(r.Context(), req.Name, req.URL, req.Username, req.Password)
+	reg, err := s.registries.Create(r.Context(), req.Name, req.URL, req.Username, req.Password, ownerScope(r))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return

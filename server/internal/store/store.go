@@ -58,7 +58,8 @@ type Registry struct {
 	Name        string    `json:"name"`
 	URL         string    `json:"url"` // host, e.g. "ghcr.io", "registry-1.docker.io"
 	Username    string    `json:"username"`
-	PasswordEnc string    `json:"-"` // never serialized to clients
+	PasswordEnc string    `json:"-"`     // never serialized to clients
+	Owner       string    `json:"owner"` // member username, or "" for shared/admin
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
@@ -123,6 +124,7 @@ CREATE TABLE IF NOT EXISTS registries (
     url          TEXT NOT NULL,
     username     TEXT NOT NULL DEFAULT '',
     password_enc TEXT NOT NULL DEFAULT '',
+    owner        TEXT NOT NULL DEFAULT '',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS users (
@@ -178,6 +180,8 @@ ALTER TABLE services ADD COLUMN IF NOT EXISTS advanced TEXT NOT NULL DEFAULT '{}
 -- served on. 0 = local. Additive so existing rows default to the local host.
 ALTER TABLE routes    ADD COLUMN IF NOT EXISTS endpoint_id BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE services  ADD COLUMN IF NOT EXISTS endpoint_id BIGINT NOT NULL DEFAULT 0;
+-- Registries can be owned by a member (empty = shared/admin-created).
+ALTER TABLE registries ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT '';
 -- Per-user environment grants: which remote environments a member may use
 -- (admins may use all). The local host (id 0) is always allowed and not stored.
 -- Each grant carries a per-environment quota (0 = none granted yet).
@@ -289,9 +293,17 @@ func (s *Store) DeleteTunnel(ctx context.Context, id int64) error {
 
 // --- Registries ---
 
-// ListRegistries returns all registry configs (without decrypting passwords).
-func (s *Store) ListRegistries(ctx context.Context) ([]Registry, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, name, url, username, password_enc, created_at FROM registries ORDER BY name`)
+// ListRegistries returns registry configs without decrypting passwords; when
+// owner != "" only that owner's rows are returned.
+func (s *Store) ListRegistries(ctx context.Context, owner string) ([]Registry, error) {
+	q := `SELECT id, name, url, username, password_enc, owner, created_at FROM registries`
+	var args []any
+	if owner != "" {
+		q += ` WHERE owner = $1`
+		args = append(args, owner)
+	}
+	q += ` ORDER BY name`
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +311,7 @@ func (s *Store) ListRegistries(ctx context.Context) ([]Registry, error) {
 	var out []Registry
 	for rows.Next() {
 		var r Registry
-		if err := rows.Scan(&r.ID, &r.Name, &r.URL, &r.Username, &r.PasswordEnc, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.URL, &r.Username, &r.PasswordEnc, &r.Owner, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -307,14 +319,25 @@ func (s *Store) ListRegistries(ctx context.Context) ([]Registry, error) {
 	return out, rows.Err()
 }
 
+// GetRegistry returns one registry by id (for ownership checks).
+func (s *Store) GetRegistry(ctx context.Context, id int64) (Registry, error) {
+	var r Registry
+	err := s.pool.QueryRow(ctx, `SELECT id, name, url, username, password_enc, owner, created_at FROM registries WHERE id = $1`, id).
+		Scan(&r.ID, &r.Name, &r.URL, &r.Username, &r.PasswordEnc, &r.Owner, &r.CreatedAt)
+	if err != nil {
+		return Registry{}, err
+	}
+	return r, nil
+}
+
 // InsertRegistry stores a new registry config (PasswordEnc must already be
 // encrypted).
 func (s *Store) InsertRegistry(ctx context.Context, r Registry) (Registry, error) {
 	err := s.pool.QueryRow(ctx, `
-INSERT INTO registries (name, url, username, password_enc)
-VALUES ($1, $2, $3, $4)
+INSERT INTO registries (name, url, username, password_enc, owner)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING id, created_at`,
-		r.Name, r.URL, r.Username, r.PasswordEnc).Scan(&r.ID, &r.CreatedAt)
+		r.Name, r.URL, r.Username, r.PasswordEnc, r.Owner).Scan(&r.ID, &r.CreatedAt)
 	if err != nil {
 		return Registry{}, err
 	}

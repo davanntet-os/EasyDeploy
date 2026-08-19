@@ -42,7 +42,8 @@ type Tab =
   | "expose"
   | "environments"
   | "users"
-  | "requests";
+  | "requests"
+  | "docs";
 
 const TAB_META: Record<Tab, { icon: (p: { size?: number }) => JSX.Element; label: string }> = {
   overview: { icon: Icon.Gauge, label: "Overview" },
@@ -56,12 +57,13 @@ const TAB_META: Record<Tab, { icon: (p: { size?: number }) => JSX.Element; label
   environments: { icon: Icon.Server, label: "Environments" },
   users: { icon: Icon.Users, label: "Users" },
   requests: { icon: Icon.Inbox, label: "Requests" },
+  docs: { icon: Icon.Book, label: "Docs" },
 };
 
 // Tabs visible per role. Members get a reduced surface centered on their
 // services and resource requests.
-const ADMIN_TABS: Tab[] = ["overview", "containers", "services", "networks", "volumes", "routes", "registries", "expose", "environments", "users", "requests"];
-const MEMBER_TABS: Tab[] = ["overview", "containers", "services", "requests"];
+const ADMIN_TABS: Tab[] = ["overview", "containers", "services", "networks", "volumes", "routes", "registries", "expose", "environments", "users", "requests", "docs"];
+const MEMBER_TABS: Tab[] = ["overview", "containers", "services", "networks", "volumes", "registries", "requests", "docs"];
 
 export function App() {
   const [authed, setAuthed] = useState<boolean>(!!auth.get());
@@ -279,6 +281,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           {activeTab === "environments" && <Environments />}
           {activeTab === "users" && <Users />}
           {activeTab === "requests" && <Requests isAdmin={!!isAdmin} onReviewed={refreshMe} />}
+          {activeTab === "docs" && <Docs isAdmin={!!isAdmin} onGo={go} />}
             </>
           )}
         </main>
@@ -597,11 +600,11 @@ function EnvHealth({ endpoints, onSwitch }: { endpoints: Endpoint[] | null; onSw
 function Overview({ me, isAdmin, onGo }: { me: Me | null; isAdmin: boolean; onGo: (t: Tab) => void }) {
   const [containers] = useAsync<Container[]>(() => api.containers(), []);
   const [services] = useAsync<Service[]>(() => api.services(), []);
-  // Networks, volumes, and images are admin-only infrastructure — members never
-  // fetch them (the endpoints would 403).
+  // Networks and volumes are member-usable (scoped to what they own); images
+  // remain admin-only infrastructure.
   const [images] = useAsync<unknown[]>(() => (isAdmin ? api.images() : Promise.resolve([])), [isAdmin]);
-  const [networks] = useAsync<DockerNetwork[]>(() => (isAdmin ? api.networks() : Promise.resolve([] as DockerNetwork[])), [isAdmin]);
-  const [volumes] = useAsync<DockerVolume[]>(() => (isAdmin ? api.volumes() : Promise.resolve([] as DockerVolume[])), [isAdmin]);
+  const [networks] = useAsync<DockerNetwork[]>(() => api.networks(), []);
+  const [volumes] = useAsync<DockerVolume[]>(() => api.volumes(), []);
   const [endpoints] = useAsync<Endpoint[]>(() => (isAdmin ? api.endpoints() : Promise.resolve([] as Endpoint[])), [isAdmin]);
   const [pending] = useAsync<ResourceRequest[]>(() => api.requests("pending"), []);
 
@@ -615,8 +618,8 @@ function Overview({ me, isAdmin, onGo }: { me: Me | null; isAdmin: boolean; onGo
         <StatTile icon={Icon.Play2} label="Running" value={running} accent="ok" onClick={() => onGo("containers")} />
         <StatTile icon={Icon.Stop} label="Stopped" value={stopped} accent="muted" onClick={() => onGo("containers")} />
         <StatTile icon={Icon.Layers} label="Services" value={num(services)} accent="accent" onClick={() => onGo("services")} />
-        {isAdmin && <StatTile icon={Icon.Network} label="Networks" value={num(networks)} accent="accent" onClick={() => onGo("networks")} />}
-        {isAdmin && <StatTile icon={Icon.Drive} label="Volumes" value={num(volumes)} accent="accent" onClick={() => onGo("volumes")} />}
+        <StatTile icon={Icon.Network} label="Networks" value={num(networks)} accent="accent" onClick={() => onGo("networks")} />
+        <StatTile icon={Icon.Drive} label="Volumes" value={num(volumes)} accent="accent" onClick={() => onGo("volumes")} />
         {isAdmin && <StatTile icon={Icon.Registry} label="Images" value={num(images)} accent="accent" />}
       </div>
 
@@ -3313,6 +3316,224 @@ function VolumeBrowser({ volume, onClose }: { volume: DockerVolume; onClose: () 
           )}
         </div>
         <p className="hint vol-foot">Files are read/written through a helper container mounted on the volume.</p>
+      </div>
+    </div>
+  );
+}
+
+function DocTip({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="doc-tip">
+      <Icon.Alert size={14} /> <span>{children}</span>
+    </p>
+  );
+}
+
+type DocSection = { id: string; title: string; icon: (p: { size?: number }) => JSX.Element; adminOnly?: boolean; body: JSX.Element };
+
+// Docs is the in-app user guide. Sections are role-aware — members see only the
+// parts of the app they can use.
+function Docs({ isAdmin, onGo }: { isAdmin: boolean; onGo: (t: Tab) => void }) {
+  const refs = useRef<Record<string, HTMLElement | null>>({});
+  const scrollTo = (id: string) => refs.current[id]?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const Go = ({ tab, label }: { tab: Tab; label: string }) => (
+    <button type="button" className="doc-link" onClick={() => onGo(tab)}>
+      {label} →
+    </button>
+  );
+
+  const sections: DocSection[] = [
+    {
+      id: "start",
+      title: "Getting started",
+      icon: Icon.Gauge,
+      body: (
+        <>
+          <p>EasyDeploy manages Docker across one or more hosts, and can publish a container on its own subdomain through a built-in Envoy proxy.</p>
+          <ul>
+            <li>The <strong>left sidebar</strong> switches between sections. The <strong>Overview</strong> is your dashboard.</li>
+            <li>The <strong>environment switcher</strong> (top-right) picks which Docker host you're working on — everything (containers, services, …) targets the selected host.</li>
+            <li>The <strong>health chip</strong> (bottom-left) shows whether the selected host is reachable.</li>
+            <li>Your role (<strong>admin</strong> or <strong>member</strong>) is shown top-right and decides what you can see.</li>
+          </ul>
+        </>
+      ),
+    },
+    {
+      id: "containers",
+      title: "Containers",
+      icon: Icon.Box,
+      body: (
+        <>
+          <p>List and control containers on the selected host. Members see only their own.</p>
+          <ul>
+            <li><strong>Click a row</strong> to open the detail view: <em>Overview</em> (image, limits, networks, ports, env), <em>Logs</em>, <em>Monitor</em> (live CPU/memory/network), and an interactive <em>Shell</em>.</li>
+            <li>Row buttons: start/stop, restart, <em>Edit</em> (reconfigure), <em>Update</em> (pull the latest image and recreate in place), and delete.</li>
+            <li>Use <strong>Search</strong> to filter; long lists paginate.</li>
+          </ul>
+          <Go tab="containers" label="Open Containers" />
+        </>
+      ),
+    },
+    {
+      id: "services",
+      title: "Services (subdomains, scaling, git)",
+      icon: Icon.Layers,
+      body: (
+        <>
+          <p>A <strong>service</strong> runs N identical replica containers behind one address; Envoy load-balances across them.</p>
+          <p className="doc-h">Create one</p>
+          <ol>
+            <li><strong>New service</strong> → <em>Basic</em>: name, container port, network.</li>
+            <li><em>Source</em>: a <strong>Docker image</strong>, or a <strong>Git repo</strong> (a push webhook then rebuilds &amp; rolls it out).</li>
+            <li><em>Scaling</em>: replica count, or autoscale on CPU between min/max.</li>
+            <li><em>Advanced</em>: environment variables, extra ports, volume mounts (searchable picker), command, healthcheck, and more.</li>
+          </ol>
+          <p className="doc-h">Addresses</p>
+          <ul>
+            <li><strong>Automatic host</strong> — always present: <code>&lt;service&gt;.&lt;server&gt;.&lt;domain&gt;</code>.</li>
+            <li><strong>Custom subdomain</strong> — optional: <code>&lt;subdomain&gt;.&lt;domain&gt;</code>, set at create or later with the ✏️ on the card. It's additive.</li>
+          </ul>
+          <p className="doc-h">Manage</p>
+          <ul>
+            <li>Scale with the replica stepper; <em>Redeploy</em> (or Build &amp; redeploy for git); <em>Edit</em> to change any setting; delete.</li>
+            <li><strong>Click a card's name</strong> to see its structure: domains → load balancer → replica containers (click a replica for its detail).</li>
+          </ul>
+          <Go tab="services" label="Open Services" />
+        </>
+      ),
+    },
+    {
+      id: "requests",
+      title: "Resource requests & quotas",
+      icon: Icon.Inbox,
+      body: (
+        <>
+          <p>Members need a granted quota before they can deploy. Quotas are <strong>per environment</strong>.</p>
+          <ol>
+            <li>On <strong>Requests</strong>, pick the <em>environment</em> and the CPU/RAM you need, add a reason, and submit.</li>
+            <li>An admin approves it, which grants that quota <em>on that host</em>.</li>
+            <li>You then create services within the quota — deploys that would exceed it are blocked.</li>
+          </ol>
+          <DocTip>Admins have no quota. Members can request more at any time.</DocTip>
+          <Go tab="requests" label="Open Requests" />
+        </>
+      ),
+    },
+    {
+      id: "routes",
+      title: "Routes",
+      icon: Icon.Route,
+      adminOnly: true,
+      body: (
+        <>
+          <p>Manually map a subdomain to an existing container/host and port — a lightweight alternative to a full service.</p>
+          <Go tab="routes" label="Open Routes" />
+        </>
+      ),
+    },
+    {
+      id: "networks",
+      title: "Networks & Volumes",
+      icon: Icon.Drive,
+      body: (
+        <>
+          <p><strong>Networks</strong>: create/remove Docker networks (services default to the <code>easydeploy-edge</code> network so Envoy can reach them).</p>
+          <p><strong>Volumes</strong>: create, delete (with force for in-use), see size &amp; usage, and a full <em>file manager</em> — browse, make folders, upload, download, delete.</p>
+          <DocTip>Members can create and manage their own networks and volumes; you only see the ones you created. Admins see everything.</DocTip>
+          <p>
+            <Go tab="networks" label="Open Networks" /> &nbsp; <Go tab="volumes" label="Open Volumes" />
+          </p>
+        </>
+      ),
+    },
+    {
+      id: "registries",
+      title: "Private registries",
+      icon: Icon.Registry,
+      body: (
+        <>
+          <p>Store registry credentials (encrypted at rest) so pulls from private registries authenticate automatically. You can test a login and browse repos/tags.</p>
+          <DocTip>Members manage their own registries; you only see the ones you added.</DocTip>
+          <Go tab="registries" label="Open Registries" />
+        </>
+      ),
+    },
+    {
+      id: "environments",
+      title: "Environments (multiple hosts)",
+      icon: Icon.Server,
+      adminOnly: true,
+      body: (
+        <>
+          <p>Manage several Docker hosts from one place.</p>
+          <ol>
+            <li><strong>New environment</strong> → pick a connection: <strong>SSH</strong> (recommended — tunnels over SSH, no open port; set an SSH port if not 22), <strong>TLS</strong> (TCP + client certs), or <strong>Plain</strong> (trusted networks only). Enter a name and Docker host.</li>
+            <li>Switch hosts with the top-right switcher; <em>Edit</em> or remove a host from its card.</li>
+            <li>To run <strong>Routes/Services on a remote host</strong>, deploy its <strong>edge proxy</strong> from the card. This needs <code>EASYDEPLOY_XDS_ADVERTISE_ADDR</code> set to this machine's LAN address so the remote Envoy can reach the control plane.</li>
+          </ol>
+          <Go tab="environments" label="Open Environments" />
+        </>
+      ),
+    },
+    {
+      id: "users",
+      title: "Users & access",
+      icon: Icon.Users,
+      adminOnly: true,
+      body: (
+        <>
+          <p>Create accounts and control what each can do.</p>
+          <ul>
+            <li><strong>Role</strong> (member/admin) — editable per row; the last admin can't be demoted.</li>
+            <li><strong>Quota</strong> — set a member's local CPU/RAM inline (Save).</li>
+            <li><strong>Reset password</strong> (🔑) and delete.</li>
+            <li><strong>Assign environments</strong> (server icon) — grant a member specific remote hosts, each with its own per-environment quota.</li>
+          </ul>
+          <p>Members see and manage only their <em>own</em> containers, services, networks, volumes, and registries; they can't access images or hosts they weren't granted.</p>
+          <Go tab="users" label="Open Users" />
+        </>
+      ),
+    },
+    {
+      id: "expose",
+      title: "Public exposure",
+      icon: Icon.Globe,
+      adminOnly: true,
+      body: (
+        <>
+          <p>Make the local host's subdomains reachable from the internet, two ways:</p>
+          <ul>
+            <li><strong>WiFi / NAT public IP</strong> — detect your public IP and forward port 80.</li>
+            <li><strong>Cloud VM SSH tunnel</strong> — a reverse tunnel so a cloud VM's public IP forwards traffic to your local Envoy, no router config.</li>
+          </ul>
+          <Go tab="expose" label="Open Expose" />
+        </>
+      ),
+    },
+  ];
+
+  const shown = sections.filter((s) => isAdmin || !s.adminOnly);
+
+  return (
+    <div className="docs">
+      <nav className="docs-toc">
+        <div className="docs-toc-title">User guide</div>
+        {shown.map((s) => (
+          <button key={s.id} type="button" onClick={() => scrollTo(s.id)}>
+            <s.icon size={15} /> <span>{s.title}</span>
+          </button>
+        ))}
+      </nav>
+      <div className="docs-content">
+        {shown.map((s) => (
+          <section key={s.id} className="doc-section" ref={(el) => (refs.current[s.id] = el)}>
+            <h2>
+              <s.icon size={18} /> {s.title}
+            </h2>
+            {s.body}
+          </section>
+        ))}
       </div>
     </div>
   );

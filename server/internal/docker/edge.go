@@ -139,7 +139,7 @@ func (c *Client) ensureEdgeNetwork(ctx context.Context) error {
 	if _, err := c.cli.NetworkInspect(ctx, EdgeNetwork, network.InspectOptions{}); err == nil {
 		return nil
 	}
-	if _, err := c.CreateNetwork(ctx, EdgeNetwork, "bridge"); err != nil && !strings.Contains(err.Error(), "already exists") {
+	if _, err := c.CreateNetwork(ctx, EdgeNetwork, "bridge", nil); err != nil && !strings.Contains(err.Error(), "already exists") {
 		return fmt.Errorf("create edge network: %w", err)
 	}
 	return nil

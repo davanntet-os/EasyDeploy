@@ -31,13 +31,24 @@ func New(st *store.Store, box *secret.Box) *Service {
 	return &Service{store: st, box: box, http: &http.Client{Timeout: 15 * time.Second}}
 }
 
-// List returns configured registries (passwords are never included).
-func (s *Service) List(ctx context.Context) ([]store.Registry, error) {
-	return s.store.ListRegistries(ctx)
+// List returns configured registries (passwords are never included). When owner
+// != "" only that owner's registries are returned.
+func (s *Service) List(ctx context.Context, owner string) ([]store.Registry, error) {
+	return s.store.ListRegistries(ctx, owner)
 }
 
-// Create encrypts the password and stores a new registry.
-func (s *Service) Create(ctx context.Context, name, url, username, password string) (store.Registry, error) {
+// Owner returns the owner of a registry (for access checks).
+func (s *Service) Owner(ctx context.Context, id int64) (string, error) {
+	r, err := s.store.GetRegistry(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return r.Owner, nil
+}
+
+// Create encrypts the password and stores a new registry owned by `owner`
+// (empty for a shared/admin registry).
+func (s *Service) Create(ctx context.Context, name, url, username, password, owner string) (store.Registry, error) {
 	if name == "" || url == "" {
 		return store.Registry{}, fmt.Errorf("name and url are required")
 	}
@@ -50,6 +61,7 @@ func (s *Service) Create(ctx context.Context, name, url, username, password stri
 		URL:         normalizeHost(url),
 		Username:    username,
 		PasswordEnc: enc,
+		Owner:       owner,
 	})
 }
 
@@ -62,7 +74,7 @@ func (s *Service) Delete(ctx context.Context, id int64) error {
 // the given image, or "" if none matches (public image).
 func (s *Service) AuthForImage(ctx context.Context, image string) (string, error) {
 	host := hostForImage(image)
-	regs, err := s.store.ListRegistries(ctx)
+	regs, err := s.store.ListRegistries(ctx, "")
 	if err != nil {
 		return "", err
 	}
@@ -139,7 +151,7 @@ func (s *Service) Tags(ctx context.Context, id int64, repo string) ([]string, er
 }
 
 func (s *Service) credsFor(ctx context.Context, id int64) (store.Registry, string, error) {
-	regs, err := s.store.ListRegistries(ctx)
+	regs, err := s.store.ListRegistries(ctx, "")
 	if err != nil {
 		return store.Registry{}, "", err
 	}

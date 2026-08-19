@@ -230,6 +230,12 @@ export const Icon = {
       <path d="M10.3 12.7L20 3M16.5 6.5l2.5 2.5M13.5 9.5l2.5 2.5" />
     </Svg>
   ),
+  Book: (p: IconProps) => (
+    <Svg {...p}>
+      <path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2V5Z" />
+      <path d="M4 19a2 2 0 0 1 2-2h13" />
+    </Svg>
+  ),
   Drive: (p: IconProps) => (
     <Svg {...p}>
       <rect x="3" y="5" width="18" height="14" rx="2" />

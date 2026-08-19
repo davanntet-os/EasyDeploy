@@ -247,8 +247,12 @@ func (s *Server) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 		Size       int64             `json:"size"`     // -1 = not yet computed
 		RefCount   int64             `json:"refCount"` // -1 = not yet computed
 	}
+	owner := ownerScope(r) // "" for admins = all; members see only their own
 	out := make([]volumeView, 0, len(list))
 	for _, v := range list {
+		if owner != "" && v.Labels[docker.LabelOwner] != owner {
+			continue
+		}
 		out = append(out, volumeView{
 			Name: v.Name, Driver: v.Driver, Mountpoint: v.Mountpoint,
 			CreatedAt: v.CreatedAt, Labels: v.Labels, Size: -1, RefCount: -1,
@@ -269,12 +273,31 @@ func (s *Server) handleVolumeUsage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
+	// For members, restrict usage to volumes they own so sizes of others'
+	// volumes never leak.
+	var owned map[string]bool
+	if owner := ownerScope(r); owner != "" {
+		vols, err := cli.ListVolumes(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		owned = make(map[string]bool)
+		for _, v := range vols {
+			if v.Labels[docker.LabelOwner] == owner {
+				owned[v.Name] = true
+			}
+		}
+	}
 	type u struct {
 		Size     int64 `json:"size"`
 		RefCount int64 `json:"refCount"`
 	}
 	out := make(map[string]u, len(usage))
 	for name, ud := range usage {
+		if owned != nil && !owned[name] {
+			continue
+		}
 		out[name] = u{Size: ud.Size, RefCount: ud.RefCount}
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -293,8 +316,12 @@ func (s *Server) handleVolumeNames(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
+	owner := ownerScope(r)
 	names := make([]string, 0, len(vols))
 	for _, v := range vols {
+		if owner != "" && v.Labels[docker.LabelOwner] != owner {
+			continue
+		}
 		names = append(names, v.Name)
 	}
 	writeJSON(w, http.StatusOK, names)
@@ -310,6 +337,16 @@ func (s *Server) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return
+	}
+	// Members see only networks they own; admins see all.
+	if owner := ownerScope(r); owner != "" {
+		scoped := list[:0:0]
+		for _, n := range list {
+			if n.Labels[docker.LabelOwner] == owner {
+				scoped = append(scoped, n)
+			}
+		}
+		list = scoped
 	}
 	writeJSON(w, http.StatusOK, list)
 }

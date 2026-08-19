@@ -442,6 +442,28 @@ input:disabled { opacity: 0.5; }
 .env-grant-quota { display: flex; gap: 12px; padding-left: 30px; }
 .env-grant-quota label { flex: 1; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 
+/* ---- in-app docs / user guide ---- */
+.docs { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 28px; align-items: start; }
+.docs-toc { position: sticky; top: 78px; display: flex; flex-direction: column; gap: 2px; }
+.docs-toc-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); padding: 4px 10px 8px; }
+.docs-toc button { justify-content: flex-start; gap: 9px; background: transparent; border: 1px solid transparent; color: var(--muted); padding: 8px 10px; border-radius: 8px; text-align: left; font-size: 13px; width: 100%; }
+.docs-toc button:hover { color: var(--text); background: rgba(255,255,255,0.04); border-color: transparent; }
+.docs-toc svg { color: var(--accent); opacity: 0.85; flex: 0 0 auto; }
+.docs-content { display: flex; flex-direction: column; gap: 16px; max-width: 820px; }
+.doc-section { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow-1); padding: 20px 22px; scroll-margin-top: 78px; }
+.doc-section h2 { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; font-size: 17px; }
+.doc-section h2 svg { color: var(--accent); }
+.doc-section p { margin: 0 0 10px; color: var(--text); line-height: 1.6; }
+.doc-section ul, .doc-section ol { margin: 0 0 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; line-height: 1.55; }
+.doc-section li { color: var(--text); }
+.doc-section code { background: var(--bg-elev); }
+.doc-h { font-weight: 600; margin: 8px 0 6px !important; color: var(--muted) !important; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+.doc-tip { display: flex; align-items: flex-start; gap: 8px; background: color-mix(in srgb, var(--accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: 9px; padding: 9px 11px; font-size: 13px; }
+.doc-tip svg { color: var(--accent); flex: 0 0 auto; margin-top: 2px; }
+.doc-link { background: transparent; border: none; color: var(--accent); padding: 0; font-size: 13px; font-weight: 600; display: inline; }
+.doc-link:hover { text-decoration: underline; border-color: transparent; }
+@media (max-width: 820px) { .docs { grid-template-columns: 1fr; } .docs-toc { position: static; flex-direction: row; flex-wrap: wrap; } .docs-toc button { width: auto; } }
+
 /* ---- inline quota editor in users table ---- */
 .quota-edit { display: inline-flex; align-items: center; gap: 6px; }
 .quota-edit input { width: 72px; padding: 5px 8px; }

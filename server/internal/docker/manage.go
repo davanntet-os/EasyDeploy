@@ -53,13 +53,13 @@ func (c *Client) OwnerUsageExcludingService(ctx context.Context, owner, excludeS
 
 // --- Networks ---
 
-// CreateNetwork creates a user-defined bridge network (or the given driver)
-// and returns its ID.
-func (c *Client) CreateNetwork(ctx context.Context, name, driver string) (string, error) {
+// CreateNetwork creates a user-defined bridge network (or the given driver),
+// tagged with the given labels (e.g. easydeploy.owner), and returns its ID.
+func (c *Client) CreateNetwork(ctx context.Context, name, driver string, labels map[string]string) (string, error) {
 	if driver == "" {
 		driver = "bridge"
 	}
-	resp, err := c.cli.NetworkCreate(ctx, name, network.CreateOptions{Driver: driver})
+	resp, err := c.cli.NetworkCreate(ctx, name, network.CreateOptions{Driver: driver, Labels: labels})
 	if err != nil {
 		return "", err
 	}

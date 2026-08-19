@@ -198,16 +198,57 @@ func (s *Server) Routes() http.Handler {
 				r.Get("/containers/{id}/exec", s.handleExec)   // WebSocket (shell)
 			})
 
-			// Admin-only: user management, request review, and all
-			// infrastructure (networks, routes, registries, tunnels, volumes).
+			// Volumes, networks, and registries are usable by members but
+			// scoped to what they own: lists are filtered to the caller's
+			// resources, creates stamp the caller as owner, and the by-id/name
+			// routes are guarded by ownership middleware. Admins see/manage all.
+			r.Group(func(r chi.Router) {
+				// Volumes.
+				r.Get("/volumes", s.handleListVolumes)
+				r.Get("/volumes/usage", s.handleVolumeUsage)
+				r.Get("/volume-names", s.handleVolumeNames)
+				r.Post("/volumes", s.handleCreateVolume)
+				r.Group(func(r chi.Router) {
+					r.Use(s.requireVolumeOwner)
+					r.Get("/volumes/{name}", s.handleInspectVolume)
+					r.Get("/volumes/{name}/browse", s.handleBrowseVolume)
+					r.Post("/volumes/{name}/mkdir", s.handleMkdirVolume)
+					r.Post("/volumes/{name}/upload", s.handleUploadVolume)
+					r.Get("/volumes/{name}/download", s.handleDownloadVolume)
+					r.Delete("/volumes/{name}/file", s.handleDeleteVolumeFile)
+					r.Delete("/volumes/{name}", s.handleRemoveVolume)
+				})
+
+				// Networks.
+				r.Get("/networks", s.handleListNetworks)
+				r.Post("/networks", s.handleCreateNetwork)
+				r.Group(func(r chi.Router) {
+					r.Use(s.requireNetworkOwner)
+					r.Get("/networks/{id}", s.handleInspectNetwork)
+					r.Delete("/networks/{id}", s.handleRemoveNetwork)
+					r.Post("/networks/{id}/connect", s.handleConnectNetwork)
+					r.Post("/networks/{id}/disconnect", s.handleDisconnectNetwork)
+				})
+
+				// Registries.
+				r.Get("/registries", s.handleListRegistries)
+				r.Post("/registries", s.handleCreateRegistry)
+				r.Post("/registries/test", s.handleTestRegistry)
+				r.Group(func(r chi.Router) {
+					r.Use(s.requireRegistryOwner)
+					r.Delete("/registries/{id}", s.handleDeleteRegistry)
+					r.Get("/registries/{id}/catalog", s.handleRegistryCatalog)
+					r.Get("/registries/{id}/tags", s.handleRegistryTags)
+				})
+			})
+
+			// Admin-only: user management, request review, and shared
+			// infrastructure (images, routes, tunnels).
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireAdmin)
 
-				// Shared infrastructure — admins only. Members never list
-				// networks, volumes, or images.
+				// Images remain admin-only shared infrastructure.
 				r.Get("/images", s.handleListImages)
-				r.Get("/networks", s.handleListNetworks)
-				r.Get("/volume-names", s.handleVolumeNames)
 
 				r.Get("/users", s.handleListUsers)
 				r.Post("/users", s.handleCreateUser)
@@ -233,33 +274,9 @@ func (s *Server) Routes() http.Handler {
 
 				r.Delete("/images/{id}", s.handleRemoveImage)
 
-				r.Get("/volumes", s.handleListVolumes)
-				r.Get("/volumes/usage", s.handleVolumeUsage)
-				r.Post("/volumes", s.handleCreateVolume)
-				r.Get("/volumes/{name}", s.handleInspectVolume)
-				r.Get("/volumes/{name}/browse", s.handleBrowseVolume)
-				r.Post("/volumes/{name}/mkdir", s.handleMkdirVolume)
-				r.Post("/volumes/{name}/upload", s.handleUploadVolume)
-				r.Get("/volumes/{name}/download", s.handleDownloadVolume)
-				r.Delete("/volumes/{name}/file", s.handleDeleteVolumeFile)
-				r.Delete("/volumes/{name}", s.handleRemoveVolume)
-
-				r.Post("/networks", s.handleCreateNetwork)
-				r.Get("/networks/{id}", s.handleInspectNetwork)
-				r.Delete("/networks/{id}", s.handleRemoveNetwork)
-				r.Post("/networks/{id}/connect", s.handleConnectNetwork)
-				r.Post("/networks/{id}/disconnect", s.handleDisconnectNetwork)
-
 				r.Get("/routes", s.handleListRoutes)
 				r.Post("/routes", s.handleUpsertRoute)
 				r.Delete("/routes/{subdomain}", s.handleDeleteRoute)
-
-				r.Get("/registries", s.handleListRegistries)
-				r.Post("/registries", s.handleCreateRegistry)
-				r.Post("/registries/test", s.handleTestRegistry)
-				r.Delete("/registries/{id}", s.handleDeleteRegistry)
-				r.Get("/registries/{id}/catalog", s.handleRegistryCatalog)
-				r.Get("/registries/{id}/tags", s.handleRegistryTags)
 
 				r.Get("/public-ip", s.handlePublicIP)
 				r.Get("/tunnels", s.handleListTunnels)

@@ -46,6 +46,99 @@ func (s *Server) requireContainerOwner(next http.Handler) http.Handler {
 	})
 }
 
+// ownerScope returns the username a member's list/create should be scoped to,
+// or "" for an admin (who sees and owns everything, unscoped).
+func ownerScope(r *http.Request) string {
+	p := auth.Current(r.Context())
+	if p.IsAdmin() {
+		return ""
+	}
+	return p.Username
+}
+
+// requireVolumeOwner is middleware that, for non-admins, verifies the volume
+// named by the {name} URL param is labeled with the caller's username. Admins
+// pass through unchecked.
+func (s *Server) requireVolumeOwner(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := auth.Current(r.Context())
+		if p.IsAdmin() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		cli, err := s.clientFor(r)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		v, err := cli.InspectVolume(r.Context(), chi.URLParam(r, "name"))
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		if v.Labels[docker.LabelOwner] != p.Username {
+			writeErr(w, http.StatusForbidden, fmt.Errorf("you do not own this volume"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireNetworkOwner is middleware that, for non-admins, verifies the network
+// identified by the {id} URL param is labeled with the caller's username.
+// Admins pass through unchecked.
+func (s *Server) requireNetworkOwner(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := auth.Current(r.Context())
+		if p.IsAdmin() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		cli, err := s.clientFor(r)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		info, err := cli.InspectNetwork(r.Context(), chi.URLParam(r, "id"))
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		if info.Labels[docker.LabelOwner] != p.Username {
+			writeErr(w, http.StatusForbidden, fmt.Errorf("you do not own this network"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireRegistryOwner is middleware that, for non-admins, verifies the registry
+// identified by the {id} URL param is owned by the caller. Admins pass through.
+func (s *Server) requireRegistryOwner(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := auth.Current(r.Context())
+		if p.IsAdmin() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		owner, err := s.registries.Owner(r.Context(), id)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		if owner != p.Username {
+			writeErr(w, http.StatusForbidden, fmt.Errorf("you do not own this registry"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 const (
 	nanoPerMilliCPU = 1_000_000 // 1000 milli = 1 core = 1e9 nano
 	bytesPerMB      = 1 << 20
