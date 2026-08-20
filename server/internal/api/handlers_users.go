@@ -152,14 +152,29 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, err)
 		return
 	}
-	usedNano, usedMem, _ := s.docker.OwnerUsage(r.Context(), user.Username)
-	diskUsed, _ := s.store.OwnerDiskUsageMB(r.Context(), 0 /* local host */, user.Username, "")
+	// Quota and usage are per environment: the local host uses the user's base
+	// quota; a remote host uses the quota granted there. The client sends the
+	// selected environment via X-Endpoint-Id, so switching hosts updates this.
+	env := endpointID(r)
+	cpuQ, memQ, diskQ := user.CPUQuotaMilli, user.MemQuotaMB, user.DiskQuotaMB
+	if env != 0 {
+		cpuQ, memQ, diskQ = 0, 0, 0
+		if g, ok, _ := s.store.GetUserEndpointQuota(r.Context(), user.ID, env); ok {
+			cpuQ, memQ, diskQ = g.CPUQuotaMilli, g.MemQuotaMB, g.DiskQuotaMB
+		}
+	}
+	// Live CPU/RAM usage is counted on the selected host.
+	var usedNano, usedMem int64
+	if cli, err := s.clientFor(r); err == nil {
+		usedNano, usedMem, _ = cli.OwnerUsage(r.Context(), user.Username)
+	}
+	diskUsed, _ := s.store.OwnerDiskUsageMB(r.Context(), env, user.Username, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username":      user.Username,
 		"role":          user.Role,
-		"cpuQuotaMilli": user.CPUQuotaMilli,
-		"memQuotaMB":    user.MemQuotaMB,
-		"diskQuotaMB":   user.DiskQuotaMB,
+		"cpuQuotaMilli": cpuQ,
+		"memQuotaMB":    memQ,
+		"diskQuotaMB":   diskQ,
 		"cpuUsedMilli":  usedNano / nanoPerMilliCPU,
 		"memUsedMB":     usedMem / bytesPerMB,
 		"diskUsedMB":    diskUsed,

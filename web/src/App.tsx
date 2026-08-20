@@ -149,8 +149,11 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [envId, setEnvId] = useState(environment.get());
 
   const refreshMe = () => api.me().then(setMe).catch(() => {});
+  // Quota is per environment, so refetch /me whenever the selected host changes.
   useEffect(() => {
     refreshMe();
+  }, [envId]);
+  useEffect(() => {
     const offEnv = environment.subscribe(() => setEnvId(environment.get()));
     // Follow the URL on back/forward navigation or a pasted/edited link.
     const offRoute = onRouteChange(() => {
