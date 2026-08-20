@@ -73,8 +73,10 @@ export interface Me {
   role: Role;
   cpuQuotaMilli: number;
   memQuotaMB: number;
+  diskQuotaMB: number;
   cpuUsedMilli: number;
   memUsedMB: number;
+  diskUsedMB: number;
 }
 
 export interface User {
@@ -83,6 +85,7 @@ export interface User {
   role: Role;
   cpuQuotaMilli: number;
   memQuotaMB: number;
+  diskQuotaMB: number;
   createdAt: string;
 }
 
@@ -194,6 +197,7 @@ export interface ResourceRequest {
   endpointId: number; // which environment the quota is for (0 = local)
   cpuMilli: number;
   memMB: number;
+  diskMB: number;
   note: string;
   status: "pending" | "approved" | "rejected";
   reviewedBy: string;
@@ -207,6 +211,7 @@ export interface EndpointGrant {
   endpointId: number;
   cpuQuotaMilli: number;
   memQuotaMB: number;
+  diskQuotaMB: number;
 }
 
 // --- token management ---
@@ -323,8 +328,9 @@ export interface DockerVolume {
   mountpoint: string;
   createdAt: string;
   labels: Record<string, string> | null;
-  size: number; // bytes, -1 if unknown
+  size: number; // actual bytes, -1 if unknown
   refCount: number; // containers using it, -1 if unknown
+  sizeMB: number; // app-level size budget (0 = none set)
 }
 
 export interface VolFile {
@@ -343,10 +349,10 @@ export const api = {
   health: () => req<{ ok: boolean; dockerError: string }>("/health"),
 
   users: () => req<User[]>("/users"),
-  createUser: (u: { username: string; password: string; role: Role; cpuQuotaMilli: number; memQuotaMB: number }) =>
+  createUser: (u: { username: string; password: string; role: Role; cpuQuotaMilli: number; memQuotaMB: number; diskQuotaMB: number }) =>
     req<User>("/users", { method: "POST", body: JSON.stringify(u) }),
-  updateUserQuota: (id: number, cpuQuotaMilli: number, memQuotaMB: number) =>
-    req(`/users/${id}/quota`, { method: "PUT", body: JSON.stringify({ cpuQuotaMilli, memQuotaMB }) }),
+  updateUserQuota: (id: number, cpuQuotaMilli: number, memQuotaMB: number, diskQuotaMB: number) =>
+    req(`/users/${id}/quota`, { method: "PUT", body: JSON.stringify({ cpuQuotaMilli, memQuotaMB, diskQuotaMB }) }),
   setUserRole: (id: number, role: Role) => req(`/users/${id}/role`, { method: "PUT", body: JSON.stringify({ role }) }),
   getUserEnvironments: (id: number) => req<EndpointGrant[]>(`/users/${id}/environments`),
   setUserEnvironments: (id: number, grants: EndpointGrant[]) =>
@@ -368,9 +374,9 @@ export const api = {
   deleteService: (name: string) => req(`/services/${name}`, { method: "DELETE" }),
 
   requests: (status?: string) => req<ResourceRequest[]>(`/requests${status ? `?status=${status}` : ""}`),
-  createRequest: (r: { endpointId: number; cpuMilli: number; memMB: number; note: string }) =>
+  createRequest: (r: { endpointId: number; cpuMilli: number; memMB: number; diskMB: number; note: string }) =>
     req<ResourceRequest>("/requests", { method: "POST", body: JSON.stringify(r) }),
-  reviewRequest: (id: number, body: { approve: boolean; grantCpuMilli?: number; grantMemMB?: number; note?: string }) =>
+  reviewRequest: (id: number, body: { approve: boolean; grantCpuMilli?: number; grantMemMB?: number; grantDiskMB?: number; note?: string }) =>
     req(`/requests/${id}/review`, { method: "POST", body: JSON.stringify(body) }),
 
   containers: () => req<Container[]>("/containers"),
@@ -410,8 +416,10 @@ export const api = {
   // manager is admin-only), for the service form's mount-source picker.
   volumeNames: () => req<string[]>("/volume-names"),
   volumeUsage: () => req<Record<string, { size: number; refCount: number }>>("/volumes/usage"),
-  createVolume: (name: string, driver = "local") =>
-    req("/volumes", { method: "POST", body: JSON.stringify({ name, driver }) }),
+  createVolume: (name: string, driver = "local", sizeMB = 0) =>
+    req<DockerVolume>("/volumes", { method: "POST", body: JSON.stringify({ name, driver, sizeMB }) }),
+  resizeVolume: (name: string, sizeMB: number) =>
+    req(`/volumes/${encodeURIComponent(name)}/resize`, { method: "POST", body: JSON.stringify({ sizeMB }) }),
   removeVolume: (name: string, force = false) =>
     req(`/volumes/${encodeURIComponent(name)}${force ? "?force=true" : ""}`, { method: "DELETE" }),
   browseVolume: (name: string, path: string) =>

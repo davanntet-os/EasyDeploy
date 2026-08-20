@@ -211,6 +211,7 @@ func (s *Server) Routes() http.Handler {
 				r.Group(func(r chi.Router) {
 					r.Use(s.requireVolumeOwner)
 					r.Get("/volumes/{name}", s.handleInspectVolume)
+					r.Post("/volumes/{name}/resize", s.handleResizeVolume)
 					r.Get("/volumes/{name}/browse", s.handleBrowseVolume)
 					r.Post("/volumes/{name}/mkdir", s.handleMkdirVolume)
 					r.Post("/volumes/{name}/upload", s.handleUploadVolume)

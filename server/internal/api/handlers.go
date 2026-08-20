@@ -244,10 +244,12 @@ func (s *Server) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 		Mountpoint string            `json:"mountpoint"`
 		CreatedAt  string            `json:"createdAt"`
 		Labels     map[string]string `json:"labels"`
-		Size       int64             `json:"size"`     // -1 = not yet computed
+		Size       int64             `json:"size"`     // actual bytes; -1 = not yet computed
 		RefCount   int64             `json:"refCount"` // -1 = not yet computed
+		SizeMB     int               `json:"sizeMB"`   // app-level size budget (0 = none)
 	}
 	owner := ownerScope(r) // "" for admins = all; members see only their own
+	budgets, _ := s.store.ListVolumeSizes(r.Context(), endpointID(r))
 	out := make([]volumeView, 0, len(list))
 	for _, v := range list {
 		if owner != "" && v.Labels[docker.LabelOwner] != owner {
@@ -256,6 +258,7 @@ func (s *Server) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 		out = append(out, volumeView{
 			Name: v.Name, Driver: v.Driver, Mountpoint: v.Mountpoint,
 			CreatedAt: v.CreatedAt, Labels: v.Labels, Size: -1, RefCount: -1,
+			SizeMB: budgets[v.Name],
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

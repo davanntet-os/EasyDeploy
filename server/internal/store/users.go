@@ -31,6 +31,7 @@ type User struct {
 	Role          Role      `json:"role"`
 	CPUQuotaMilli int       `json:"cpuQuotaMilli"` // 1000 = 1 core
 	MemQuotaMB    int       `json:"memQuotaMB"`
+	DiskQuotaMB   int       `json:"diskQuotaMB"` // total volume-size budget (local host)
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
@@ -51,6 +52,7 @@ type ResourceRequest struct {
 	EndpointID int64         `json:"endpointId"` // which environment the quota is for (0 = local)
 	CPUMilli   int           `json:"cpuMilli"`
 	MemMB      int           `json:"memMB"`
+	DiskMB     int           `json:"diskMB"` // storage quota requested (MB)
 	Note       string        `json:"note"`
 	Status     RequestStatus `json:"status"`
 	ReviewedBy string        `json:"reviewedBy"`
@@ -71,10 +73,10 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 // CreateUser inserts a new account.
 func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 	err := s.pool.QueryRow(ctx, `
-INSERT INTO users (username, password_hash, role, cpu_quota_milli, mem_quota_mb)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO users (username, password_hash, role, cpu_quota_milli, mem_quota_mb, disk_quota_mb)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, created_at`,
-		u.Username, u.PasswordHash, u.Role, u.CPUQuotaMilli, u.MemQuotaMB).Scan(&u.ID, &u.CreatedAt)
+		u.Username, u.PasswordHash, u.Role, u.CPUQuotaMilli, u.MemQuotaMB, u.DiskQuotaMB).Scan(&u.ID, &u.CreatedAt)
 	if err != nil {
 		return User{}, err
 	}
@@ -83,14 +85,14 @@ RETURNING id, created_at`,
 
 func scanUser(row pgx.Row) (User, error) {
 	var u User
-	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CPUQuotaMilli, &u.MemQuotaMB, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CPUQuotaMilli, &u.MemQuotaMB, &u.DiskQuotaMB, &u.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
 	return u, err
 }
 
-const userCols = `id, username, password_hash, role, cpu_quota_milli, mem_quota_mb, created_at`
+const userCols = `id, username, password_hash, role, cpu_quota_milli, mem_quota_mb, disk_quota_mb, created_at`
 
 // GetUserByUsername looks up an account by username.
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, error) {
@@ -120,9 +122,9 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	return out, rows.Err()
 }
 
-// UpdateUserQuota sets a member's CPU/RAM quota.
-func (s *Store) UpdateUserQuota(ctx context.Context, id int64, cpuMilli, memMB int) error {
-	_, err := s.pool.Exec(ctx, `UPDATE users SET cpu_quota_milli = $1, mem_quota_mb = $2 WHERE id = $3`, cpuMilli, memMB, id)
+// UpdateUserQuota sets a member's CPU/RAM/disk quota for the local host.
+func (s *Store) UpdateUserQuota(ctx context.Context, id int64, cpuMilli, memMB, diskMB int) error {
+	_, err := s.pool.Exec(ctx, `UPDATE users SET cpu_quota_milli = $1, mem_quota_mb = $2, disk_quota_mb = $3 WHERE id = $4`, cpuMilli, memMB, diskMB, id)
 	return err
 }
 
@@ -157,10 +159,10 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 // CreateRequest files a new pending resource request.
 func (s *Store) CreateRequest(ctx context.Context, r ResourceRequest) (ResourceRequest, error) {
 	err := s.pool.QueryRow(ctx, `
-INSERT INTO resource_requests (user_id, username, endpoint_id, cpu_milli, mem_mb, note, status)
-VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+INSERT INTO resource_requests (user_id, username, endpoint_id, cpu_milli, mem_mb, disk_mb, note, status)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
 RETURNING id, created_at`,
-		r.UserID, r.Username, r.EndpointID, r.CPUMilli, r.MemMB, r.Note).Scan(&r.ID, &r.CreatedAt)
+		r.UserID, r.Username, r.EndpointID, r.CPUMilli, r.MemMB, r.DiskMB, r.Note).Scan(&r.ID, &r.CreatedAt)
 	if err != nil {
 		return ResourceRequest{}, err
 	}
@@ -168,11 +170,11 @@ RETURNING id, created_at`,
 	return r, nil
 }
 
-const reqCols = `id, user_id, username, endpoint_id, cpu_milli, mem_mb, note, status, reviewed_by, review_note, created_at, reviewed_at`
+const reqCols = `id, user_id, username, endpoint_id, cpu_milli, mem_mb, disk_mb, note, status, reviewed_by, review_note, created_at, reviewed_at`
 
 func scanRequest(row pgx.Row) (ResourceRequest, error) {
 	var r ResourceRequest
-	err := row.Scan(&r.ID, &r.UserID, &r.Username, &r.EndpointID, &r.CPUMilli, &r.MemMB, &r.Note, &r.Status, &r.ReviewedBy, &r.ReviewNote, &r.CreatedAt, &r.ReviewedAt)
+	err := row.Scan(&r.ID, &r.UserID, &r.Username, &r.EndpointID, &r.CPUMilli, &r.MemMB, &r.DiskMB, &r.Note, &r.Status, &r.ReviewedBy, &r.ReviewNote, &r.CreatedAt, &r.ReviewedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ResourceRequest{}, ErrNotFound
 	}

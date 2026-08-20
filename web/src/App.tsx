@@ -274,7 +274,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           {activeTab === "containers" && <Containers />}
           {activeTab === "services" && <Services me={me} onChanged={refreshMe} />}
           {activeTab === "networks" && <Networks />}
-          {activeTab === "volumes" && <Volumes />}
+          {activeTab === "volumes" && <Volumes me={me} />}
           {activeTab === "routes" && <Routes />}
           {activeTab === "registries" && <Registries />}
           {activeTab === "expose" && <Expose />}
@@ -522,12 +522,14 @@ function EnvModal({ editing, onClose, onAdded }: { editing?: Endpoint; onClose: 
   );
 }
 
-// QuotaPill shows a member's live CPU/RAM usage against their granted quota.
+// QuotaPill shows a member's live CPU/RAM/storage usage against their granted
+// quota (local host).
 function QuotaPill({ me }: { me: Me }) {
   const cpuPct = me.cpuQuotaMilli ? Math.min(100, (me.cpuUsedMilli / me.cpuQuotaMilli) * 100) : 0;
   const memPct = me.memQuotaMB ? Math.min(100, (me.memUsedMB / me.memQuotaMB) * 100) : 0;
+  const diskPct = me.diskQuotaMB ? Math.min(100, (me.diskUsedMB / me.diskQuotaMB) * 100) : 0;
   return (
-    <div className="quota-pill" title="Your resource usage vs. granted quota">
+    <div className="quota-pill" title="Your usage vs. granted quota (local host)">
       <span className="quota-metric">
         <Icon.Cpu size={13} />
         <span className="quota-bar">
@@ -541,6 +543,13 @@ function QuotaPill({ me }: { me: Me }) {
           <span className="quota-fill" style={{ width: `${memPct}%` }} />
         </span>
         {me.memUsedMB}/{me.memQuotaMB} MB
+      </span>
+      <span className="quota-metric">
+        <Icon.Drive size={13} />
+        <span className="quota-bar">
+          <span className="quota-fill" style={{ width: `${diskPct}%` }} />
+        </span>
+        {fmtMB(me.diskUsedMB)}/{fmtMB(me.diskQuotaMB)}
       </span>
     </div>
   );
@@ -640,6 +649,7 @@ function Overview({ me, isAdmin, onGo }: { me: Me | null; isAdmin: boolean; onGo
               <div className="ov-quota">
                 <QuotaBar label="CPU" used={me.cpuUsedMilli / 1000} total={me.cpuQuotaMilli / 1000} unit="cores" />
                 <QuotaBar label="Memory" used={me.memUsedMB} total={me.memQuotaMB} unit="MB" />
+                <QuotaBar label="Storage" used={me.diskUsedMB} total={me.diskQuotaMB} unit="MB" />
               </div>
             </div>
           )
@@ -2275,7 +2285,7 @@ function Users() {
 }
 
 function UserCreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [f, setF] = useState({ username: "", password: "", role: "member" as Role, cpuCores: 1, memMB: 512 });
+  const [f, setF] = useState({ username: "", password: "", role: "member" as Role, cpuCores: 1, memMB: 512, diskGB: 5 });
   const [busy, setBusy] = useState(false);
   const valid = f.username.trim() !== "" && f.password.length >= 6;
   const submit = async (e: React.FormEvent) => {
@@ -2289,6 +2299,7 @@ function UserCreateModal({ onClose, onCreated }: { onClose: () => void; onCreate
         role: f.role,
         cpuQuotaMilli: Math.round(f.cpuCores * 1000),
         memQuotaMB: f.memMB,
+        diskQuotaMB: Math.round(f.diskGB * 1024),
       }),
       { success: `Created ${f.username}` },
     );
@@ -2323,16 +2334,22 @@ function UserCreateModal({ onClose, onCreated }: { onClose: () => void; onCreate
             </select>
           </label>
           {f.role === "member" && (
-            <div className="row">
+            <>
+              <div className="row">
+                <label>
+                  CPU quota (cores)
+                  <input type="number" step="0.1" min="0" value={f.cpuCores} onChange={(e) => setF({ ...f, cpuCores: Number(e.target.value) })} />
+                </label>
+                <label>
+                  Memory quota (MB)
+                  <input type="number" min="0" value={f.memMB} onChange={(e) => setF({ ...f, memMB: Number(e.target.value) })} />
+                </label>
+              </div>
               <label>
-                CPU quota (cores)
-                <input type="number" step="0.1" min="0" value={f.cpuCores} onChange={(e) => setF({ ...f, cpuCores: Number(e.target.value) })} />
+                Storage quota (GB)
+                <input type="number" step="0.5" min="0" value={f.diskGB} onChange={(e) => setF({ ...f, diskGB: Number(e.target.value) })} />
               </label>
-              <label>
-                Memory quota (MB)
-                <input type="number" min="0" value={f.memMB} onChange={(e) => setF({ ...f, memMB: Number(e.target.value) })} />
-              </label>
-            </div>
+            </>
           )}
           <div className="actions" style={{ justifyContent: "flex-end" }}>
             <button type="button" onClick={onClose} disabled={busy}>
@@ -2363,7 +2380,7 @@ function UserRow({ user, onChanged }: { user: User; onChanged: () => void }) {
           "unlimited"
         ) : (
           <>
-            {formatCores(user.cpuQuotaMilli)} cores <span className="dot-sep">·</span> {user.memQuotaMB} MB
+            {formatCores(user.cpuQuotaMilli)} cores <span className="dot-sep">·</span> {user.memQuotaMB} MB <span className="dot-sep">·</span> {fmtMB(user.diskQuotaMB)}
           </>
         )}
       </td>
@@ -2391,12 +2408,13 @@ const formatCores = (milli: number) => {
 // UserManageModal is the single place to manage everything about a user: role,
 // per-environment access + quota (local host + each remote), password, and
 // deletion. Quota is per environment, so it can never be edited as one number.
-type EnvGrantForm = { checked: boolean; cpu: number; mem: number };
+type EnvGrantForm = { checked: boolean; cpu: number; mem: number; disk: number };
 function UserManageModal({ user, onClose, onChanged }: { user: User; onClose: () => void; onChanged: () => void }) {
   const [envs] = useAsync<Endpoint[]>(() => api.endpoints(), []);
   const [role, setRole] = useState<Role>(user.role);
   const [localCpu, setLocalCpu] = useState(user.cpuQuotaMilli / 1000);
   const [localMem, setLocalMem] = useState(user.memQuotaMB);
+  const [localDisk, setLocalDisk] = useState(user.diskQuotaMB / 1024);
   const [grants, setGrants] = useState<Record<number, EnvGrantForm> | null>(null);
   const [newPw, setNewPw] = useState("");
   const [pwBusy, pwRun] = useAction();
@@ -2406,13 +2424,13 @@ function UserManageModal({ user, onClose, onChanged }: { user: User; onClose: ()
   useEffect(() => {
     api.getUserEnvironments(user.id).then((gs) => {
       const map: Record<number, EnvGrantForm> = {};
-      (gs ?? []).forEach((g) => (map[g.endpointId] = { checked: true, cpu: g.cpuQuotaMilli / 1000, mem: g.memQuotaMB }));
+      (gs ?? []).forEach((g) => (map[g.endpointId] = { checked: true, cpu: g.cpuQuotaMilli / 1000, mem: g.memQuotaMB, disk: g.diskQuotaMB / 1024 }));
       setGrants(map);
     }).catch(() => setGrants({}));
   }, [user.id]);
 
   const remotes = (envs ?? []).filter((e) => !e.local);
-  const g = (id: number): EnvGrantForm => grants?.[id] ?? { checked: false, cpu: 1, mem: 512 };
+  const g = (id: number): EnvGrantForm => grants?.[id] ?? { checked: false, cpu: 1, mem: 512, disk: 5 };
   const patch = (id: number, p: Partial<EnvGrantForm>) => setGrants((cur) => ({ ...(cur ?? {}), [id]: { ...g(id), ...p } }));
 
   const setPassword = async () => {
@@ -2433,10 +2451,10 @@ function UserManageModal({ user, onClose, onChanged }: { user: User; onClose: ()
         await api.setUserRole(user.id, role);
       }
       if (role === "member") {
-        await api.updateUserQuota(user.id, Math.round(localCpu * 1000), localMem);
+        await api.updateUserQuota(user.id, Math.round(localCpu * 1000), localMem, Math.round(localDisk * 1024));
         const payload = remotes
           .filter((e) => grants?.[e.id]?.checked)
-          .map((e) => ({ endpointId: e.id, cpuQuotaMilli: Math.round(g(e.id).cpu * 1000), memQuotaMB: g(e.id).mem }));
+          .map((e) => ({ endpointId: e.id, cpuQuotaMilli: Math.round(g(e.id).cpu * 1000), memQuotaMB: g(e.id).mem, diskQuotaMB: Math.round(g(e.id).disk * 1024) }));
         await api.setUserEnvironments(user.id, payload);
       }
       toast("success", `Saved ${user.username}`);
@@ -2496,7 +2514,7 @@ function UserManageModal({ user, onClose, onChanged }: { user: User; onClose: ()
           {isMember && (
             <section className="um-section">
               <h4>Access &amp; quota per environment</h4>
-              <p className="hint">Each environment has its own CPU/RAM quota. The local host is always available; grant remote hosts below.</p>
+              <p className="hint">Each environment has its own CPU / RAM / storage quota. The local host is always available; grant remote hosts below.</p>
 
               <div className="env-grant um-local">
                 <div className="check">
@@ -2512,6 +2530,10 @@ function UserManageModal({ user, onClose, onChanged }: { user: User; onClose: ()
                   <label>
                     Memory (MB)
                     <input type="number" min="0" value={localMem} onChange={(e) => setLocalMem(Number(e.target.value))} />
+                  </label>
+                  <label>
+                    Storage (GB)
+                    <input type="number" step="0.5" min="0" value={localDisk} onChange={(e) => setLocalDisk(Number(e.target.value))} />
                   </label>
                 </div>
               </div>
@@ -2540,6 +2562,10 @@ function UserManageModal({ user, onClose, onChanged }: { user: User; onClose: ()
                             <label>
                               Memory (MB)
                               <input type="number" min="0" value={gf.mem} onChange={(ev) => patch(e.id, { mem: Number(ev.target.value) })} />
+                            </label>
+                            <label>
+                              Storage (GB)
+                              <input type="number" step="0.5" min="0" value={gf.disk} onChange={(ev) => patch(e.id, { disk: Number(ev.target.value) })} />
                             </label>
                           </div>
                         )}
@@ -2597,7 +2623,7 @@ function UserManageModal({ user, onClose, onChanged }: { user: User; onClose: ()
 function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () => void }) {
   const [list, err, reload] = useAsync<ResourceRequest[]>(() => api.requests(), []);
   const [envs] = useAsync<Endpoint[]>(() => api.endpoints(), []);
-  const [form, setForm] = useState({ endpointId: 0, cpuCores: 1, memMB: 512, note: "" });
+  const [form, setForm] = useState({ endpointId: 0, cpuCores: 1, memMB: 512, diskGB: 5, note: "" });
   const [busy, setBusy] = useState(false);
   const envName = (id: number) => (envs ?? []).find((e) => e.id === id)?.name ?? (id === 0 ? "Local" : `env ${id}`);
 
@@ -2605,12 +2631,12 @@ function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () =>
     e.preventDefault();
     setBusy(true);
     const res = await run(
-      api.createRequest({ endpointId: form.endpointId, cpuMilli: Math.round(form.cpuCores * 1000), memMB: form.memMB, note: form.note }),
+      api.createRequest({ endpointId: form.endpointId, cpuMilli: Math.round(form.cpuCores * 1000), memMB: form.memMB, diskMB: Math.round(form.diskGB * 1024), note: form.note }),
       { success: "Request submitted" }
     );
     setBusy(false);
     if (res) {
-      setForm({ endpointId: 0, cpuCores: 1, memMB: 512, note: "" });
+      setForm({ endpointId: 0, cpuCores: 1, memMB: 512, diskGB: 5, note: "" });
       reload();
     }
   };
@@ -2640,6 +2666,10 @@ function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () =>
                 Memory (MB)
                 <input type="number" min="0" value={form.memMB} onChange={(e) => setForm({ ...form, memMB: Number(e.target.value) })} />
               </label>
+              <label>
+                Storage (GB)
+                <input type="number" step="0.5" min="0" value={form.diskGB} onChange={(e) => setForm({ ...form, diskGB: Number(e.target.value) })} />
+              </label>
             </div>
             <label>
               Reason (optional)
@@ -2649,7 +2679,7 @@ function Requests({ isAdmin, onReviewed }: { isAdmin: boolean; onReviewed: () =>
               {busy ? <Icon.Spinner size={15} /> : <Icon.Inbox size={15} />}
               <span>Submit request</span>
             </button>
-            <p className="hint">An admin reviews your request. Once approved, the granted CPU/RAM becomes your quota on that environment.</p>
+            <p className="hint">An admin reviews your request. Once approved, the granted CPU / RAM / storage becomes your quota on that environment. Leave a field at 0 to leave that dimension unchanged.</p>
           </form>
         </section>
       )}
@@ -2705,7 +2735,11 @@ function RequestRow({ rq, isAdmin, envName, onReviewed }: { rq: ResourceRequest;
         </span>
       </td>
       <td className="muted">
-        {(rq.cpuMilli / 1000).toFixed(1)} CPU · {rq.memMB} MB
+        {[
+          rq.cpuMilli > 0 ? `${(rq.cpuMilli / 1000).toFixed(1)} CPU` : null,
+          rq.memMB > 0 ? `${rq.memMB} MB` : null,
+          rq.diskMB > 0 ? `${fmtMB(rq.diskMB)} disk` : null,
+        ].filter(Boolean).join(" · ") || "—"}
       </td>
       <td className="muted">{rq.note || "—"}</td>
       <td>
@@ -3418,10 +3452,11 @@ function fmtBytes(n: number): string {
 
 const matchVolume = (v: DockerVolume, q: string) => v.name.toLowerCase().includes(q) || v.driver.toLowerCase().includes(q);
 
-function Volumes() {
+function Volumes({ me }: { me: Me | null }) {
   const [list, err, reload] = useAsync<DockerVolume[]>(() => api.volumes(), []);
   const [usage, setUsage] = useState<Record<string, { size: number; refCount: number }> | null>(null);
   const [creating, setCreating] = useState(false);
+  const [resizing, setResizing] = useState<DockerVolume | null>(null);
   const [browse, setBrowse] = useState<DockerVolume | null>(null);
   const sp = useSearchPage(list ?? [], matchVolume, 12);
 
@@ -3452,13 +3487,18 @@ function Volumes() {
         </span>
       </div>
       {creating && (
-        <NameCreateModal
-          title="New volume"
-          label="Volume name"
-          placeholder="my-volume"
-          hint="Created with the local driver on this host."
-          onCreate={(n) => run(api.createVolume(n), { success: `Created volume ${n}` }).then((r) => (r !== undefined ? (reload(), r) : undefined))}
+        <VolumeSizeModal
+          me={me}
           onClose={() => setCreating(false)}
+          onDone={() => { setCreating(false); reload(); }}
+        />
+      )}
+      {resizing && (
+        <VolumeSizeModal
+          me={me}
+          volume={resizing}
+          onClose={() => setResizing(null)}
+          onDone={() => { setResizing(null); reload(); }}
         />
       )}
 
@@ -3472,8 +3512,8 @@ function Volumes() {
             <thead>
               <tr>
                 <th>Name</th>
-                <th>Driver</th>
-                <th>Size</th>
+                <th>Budget</th>
+                <th>Used</th>
                 <th>In use</th>
                 <th></th>
               </tr>
@@ -3482,11 +3522,18 @@ function Volumes() {
               {sp.pageItems.map((v) => {
                 const u = usage?.[v.name];
                 const refs = u ? u.refCount : -1;
+                const over = v.sizeMB > 0 && u && u.size > v.sizeMB * 1024 * 1024;
                 return (
                   <tr key={v.name}>
                     <td className="strong mono" title={v.mountpoint}>{v.name}</td>
-                    <td className="muted">{v.driver}</td>
-                    <td className="mono">{u ? fmtBytes(u.size) : usage ? "—" : <span className="muted">…</span>}</td>
+                    <td className="mono">{v.sizeMB > 0 ? fmtMB(v.sizeMB) : <span className="muted">—</span>}</td>
+                    <td className="mono">
+                      {u ? (
+                        <span className={over ? "over-budget" : ""} title={over ? "Actual usage exceeds the budget" : undefined}>
+                          {fmtBytes(u.size)}
+                        </span>
+                      ) : usage ? "—" : <span className="muted">…</span>}
+                    </td>
                     <td>
                       {refs > 0 ? (
                         <span className="badge running">{refs} container{refs === 1 ? "" : "s"}</span>
@@ -3497,6 +3544,9 @@ function Volumes() {
                       )}
                     </td>
                     <td className="actions">
+                      <button type="button" className="btn-icon" title="Resize budget" onClick={() => setResizing(v)}>
+                        <Icon.Gauge size={15} />
+                      </button>
                       <button type="button" className="btn-icon" title="Browse files" onClick={() => setBrowse(v)}>
                         <Icon.Folder size={15} />
                       </button>
@@ -3520,6 +3570,87 @@ function Volumes() {
       {list.length > 0 && sp.filtered.length > 0 && <Pager page={sp.page} pageCount={sp.pageCount} onPage={sp.setPage} />}
       {browse && <VolumeBrowser volume={browse} onClose={() => setBrowse(null)} />}
     </>
+  );
+}
+
+// fmtMB renders a whole-MB budget as GB when large.
+function fmtMB(mb: number): string {
+  if (mb <= 0) return "—";
+  if (mb >= 1024 && mb % 1024 === 0) return `${mb / 1024} GB`;
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+  return `${mb} MB`;
+}
+
+// VolumeSizeModal creates a volume with a size budget, or resizes an existing
+// one. The size counts against the member's storage quota (admins are unlimited,
+// so size is optional for them).
+function VolumeSizeModal({ me, volume, onClose, onDone }: { me: Me | null; volume?: DockerVolume; onClose: () => void; onDone: () => void }) {
+  const resizing = !!volume;
+  const isAdmin = me?.role === "admin";
+  const initMB = volume?.sizeMB ?? 0;
+  const [name, setName] = useState("");
+  const [value, setValue] = useState(initMB >= 1024 ? initMB / 1024 : initMB || (resizing ? 0 : 1));
+  const [unit, setUnit] = useState<"GB" | "MB">(initMB > 0 && initMB < 1024 ? "MB" : "GB");
+  const [busy, setBusy] = useState(false);
+  const sizeMB = Math.round(unit === "GB" ? value * 1024 : value);
+  const validName = resizing || name.trim() !== "";
+  const validSize = isAdmin || sizeMB > 0;
+  const localRemaining = me && !isAdmin && me.diskQuotaMB > 0 ? me.diskQuotaMB - me.diskUsedMB : null;
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validName || !validSize) return;
+    setBusy(true);
+    const task = resizing
+      ? api.resizeVolume(volume!.name, sizeMB)
+      : api.createVolume(name.trim(), "local", sizeMB);
+    const res = await run(task, { success: resizing ? `Resized ${volume!.name} to ${fmtMB(sizeMB)}` : `Created volume ${name.trim()}` });
+    setBusy(false);
+    if (res !== undefined) onDone();
+  };
+
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body narrow" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong><Icon.Drive size={15} /> {resizing ? `Resize · ${volume!.name}` : "New volume"}</strong>
+          <button type="button" onClick={onClose} aria-label="Close"><Icon.Close size={16} /></button>
+        </div>
+        <form className="form modal-pad" onSubmit={submit}>
+          {!resizing && (
+            <label>
+              Volume name
+              <input autoFocus value={name} placeholder="my-volume" onChange={(e) => setName(e.target.value)} />
+            </label>
+          )}
+          <label>
+            Size {isAdmin ? <span className="muted">(optional)</span> : <span className="req">*</span>}
+            <div className="size-row">
+              <input type="number" min="0" step={unit === "GB" ? "0.5" : "128"} value={value} onChange={(e) => setValue(Number(e.target.value))} />
+              <select value={unit} onChange={(e) => setUnit(e.target.value as "GB" | "MB")}>
+                <option value="GB">GB</option>
+                <option value="MB">MB</option>
+              </select>
+            </div>
+          </label>
+          <p className="hint">
+            {isAdmin
+              ? "Size is an accounting budget (Docker local volumes aren't byte-capped). It becomes the member quota reference and can be resized later."
+              : "This counts against your storage quota. Docker doesn't hard-cap the volume, but you can't allocate more than your quota."}
+            {localRemaining !== null && (
+              <> Your local storage: <strong>{fmtMB(me!.diskUsedMB)}</strong> of <strong>{fmtMB(me!.diskQuotaMB)}</strong> used.</>
+            )}
+          </p>
+          <div className="actions" style={{ justifyContent: "flex-end" }}>
+            <button type="button" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="primary" disabled={busy || !validName || !validSize}>
+              {busy ? <Icon.Spinner size={15} /> : resizing ? <Icon.Check2 size={15} /> : <Icon.Plus size={15} />}
+              <span>{resizing ? "Save size" : "Create volume"}</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 

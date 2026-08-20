@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"easydeploy/internal/auth"
 	"easydeploy/internal/docker"
 	"easydeploy/internal/store"
 
@@ -249,13 +250,19 @@ func (s *Server) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 		Name   string            `json:"name"`
 		Driver string            `json:"driver"`
 		Labels map[string]string `json:"labels"`
+		SizeMB int               `json:"sizeMB"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	// Stamp the creator as owner so members manage only their own volumes.
-	if owner := ownerScope(r); owner != "" {
+	owner := ownerScope(r) // "" for admins (unlimited, no label)
+	// Members: enforce the storage quota and stamp ownership.
+	if owner != "" {
+		if _, err := s.enforceVolumeQuota(r, req.SizeMB, ""); err != nil {
+			writeErr(w, http.StatusForbidden, err)
+			return
+		}
 		if req.Labels == nil {
 			req.Labels = map[string]string{}
 		}
@@ -266,7 +273,79 @@ func (s *Server) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
+	// Record the size budget (used for storage-quota accounting and display).
+	if err := s.store.SetVolumeSize(r.Context(), endpointID(r), v.Name, owner, req.SizeMB); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusCreated, v)
+}
+
+// handleResizeVolume changes a volume's size budget (the "scale" action),
+// re-checking the member's storage quota. Docker local volumes aren't
+// byte-capped, so this updates the accounting budget only.
+func (s *Server) handleResizeVolume(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	var req struct {
+		SizeMB int `json:"sizeMB"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	owner := ownerScope(r)
+	if owner != "" {
+		if _, err := s.enforceVolumeQuota(r, req.SizeMB, name); err != nil {
+			writeErr(w, http.StatusForbidden, err)
+			return
+		}
+	}
+	if err := s.store.SetVolumeSize(r.Context(), endpointID(r), name, owner, req.SizeMB); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "resized", "sizeMB": req.SizeMB})
+}
+
+// enforceVolumeQuota validates a member's storage request against the disk quota
+// for the target environment, counting their existing volume budgets there.
+// excludeName omits one volume (used on resize). Admins bypass.
+func (s *Server) enforceVolumeQuota(r *http.Request, sizeMB int, excludeName string) (string, error) {
+	ctx := r.Context()
+	p := auth.Current(ctx)
+	if p.IsAdmin() {
+		return p.Username, nil
+	}
+	user, err := s.store.GetUserByID(ctx, p.UserID)
+	if err != nil {
+		return "", err
+	}
+	env := endpointID(r)
+	quota := user.DiskQuotaMB
+	if env != 0 {
+		g, ok, err := s.store.GetUserEndpointQuota(ctx, user.ID, env)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "", fmt.Errorf("no access to this environment")
+		}
+		quota = g.DiskQuotaMB
+	}
+	if quota <= 0 {
+		return "", fmt.Errorf("no storage quota granted yet on this environment — submit a request and wait for admin approval")
+	}
+	if sizeMB <= 0 {
+		return "", fmt.Errorf("volume size (MB) is required")
+	}
+	used, err := s.store.OwnerDiskUsageMB(ctx, env, user.Username, excludeName)
+	if err != nil {
+		return "", err
+	}
+	if used+sizeMB > quota {
+		return "", fmt.Errorf("exceeds storage quota: %d MB requested + %d MB in use exceeds %d MB", sizeMB, used, quota)
+	}
+	return user.Username, nil
 }
 
 func (s *Server) handleInspectVolume(w http.ResponseWriter, r *http.Request) {
@@ -288,10 +367,13 @@ func (s *Server) handleRemoveVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	force := r.URL.Query().Get("force") == "true"
-	if err := cli.RemoveVolume(r.Context(), chi.URLParam(r, "name"), force); err != nil {
+	name := chi.URLParam(r, "name")
+	if err := cli.RemoveVolume(r.Context(), name, force); err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
+	// Free the size budget so it no longer counts against the owner's quota.
+	_ = s.store.DeleteVolumeSize(r.Context(), endpointID(r), name)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }
 

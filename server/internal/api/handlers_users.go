@@ -153,13 +153,16 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	usedNano, usedMem, _ := s.docker.OwnerUsage(r.Context(), user.Username)
+	diskUsed, _ := s.store.OwnerDiskUsageMB(r.Context(), 0 /* local host */, user.Username, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username":      user.Username,
 		"role":          user.Role,
 		"cpuQuotaMilli": user.CPUQuotaMilli,
 		"memQuotaMB":    user.MemQuotaMB,
+		"diskQuotaMB":   user.DiskQuotaMB,
 		"cpuUsedMilli":  usedNano / nanoPerMilliCPU,
 		"memUsedMB":     usedMem / bytesPerMB,
+		"diskUsedMB":    diskUsed,
 	})
 }
 
@@ -181,6 +184,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Role          store.Role `json:"role"`
 		CPUQuotaMilli int        `json:"cpuQuotaMilli"`
 		MemQuotaMB    int        `json:"memQuotaMB"`
+		DiskQuotaMB   int        `json:"diskQuotaMB"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -204,6 +208,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Role:          req.Role,
 		CPUQuotaMilli: req.CPUQuotaMilli,
 		MemQuotaMB:    req.MemQuotaMB,
+		DiskQuotaMB:   req.DiskQuotaMB,
 	})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -221,12 +226,13 @@ func (s *Server) handleUpdateUserQuota(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CPUQuotaMilli int `json:"cpuQuotaMilli"`
 		MemQuotaMB    int `json:"memQuotaMB"`
+		DiskQuotaMB   int `json:"diskQuotaMB"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.store.UpdateUserQuota(r.Context(), id, req.CPUQuotaMilli, req.MemQuotaMB); err != nil {
+	if err := s.store.UpdateUserQuota(r.Context(), id, req.CPUQuotaMilli, req.MemQuotaMB, req.DiskQuotaMB); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -324,14 +330,15 @@ func (s *Server) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		EndpointID int64  `json:"endpointId"`
 		CPUMilli   int    `json:"cpuMilli"`
 		MemMB      int    `json:"memMB"`
+		DiskMB     int    `json:"diskMB"`
 		Note       string `json:"note"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.CPUMilli <= 0 || req.MemMB <= 0 {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("cpu and memory must be positive"))
+	if req.CPUMilli <= 0 && req.MemMB <= 0 && req.DiskMB <= 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("request at least one of CPU, memory, or storage"))
 		return
 	}
 	// A member may only request quota for the local host or an environment they
@@ -353,6 +360,7 @@ func (s *Server) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		EndpointID: req.EndpointID,
 		CPUMilli:   req.CPUMilli,
 		MemMB:      req.MemMB,
+		DiskMB:     req.DiskMB,
 		Note:       req.Note,
 	})
 	if err != nil {
@@ -391,6 +399,7 @@ func (s *Server) handleReviewRequest(w http.ResponseWriter, r *http.Request) {
 		Approve       bool   `json:"approve"`
 		GrantCPUMilli int    `json:"grantCpuMilli"` // optional override
 		GrantMemMB    int    `json:"grantMemMB"`    // optional override
+		GrantDiskMB   int    `json:"grantDiskMB"`   // optional override
 		Note          string `json:"note"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -411,21 +420,38 @@ func (s *Server) handleReviewRequest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
 		return
 	}
-	// Approve: grant the quota (default to what was requested).
-	grantCPU, grantMem := req.GrantCPUMilli, req.GrantMemMB
-	if grantCPU <= 0 {
-		grantCPU = rr.CPUMilli
-	}
-	if grantMem <= 0 {
-		grantMem = rr.MemMB
-	}
-	// Grant the quota on the environment the request targeted: the local host
-	// writes the user's base quota; a remote grants (or updates) the per-env
-	// quota, which also grants access to that host.
+	// Approve: set the targeted environment's quota. Each dimension is the admin
+	// override if given, else the requested amount, else the user's current
+	// value — so approving a storage-only request keeps their CPU/RAM intact.
+	var curCPU, curMem, curDisk int
 	if rr.EndpointID == 0 {
-		err = s.store.UpdateUserQuota(r.Context(), rr.UserID, grantCPU, grantMem)
+		if u, err := s.store.GetUserByID(r.Context(), rr.UserID); err == nil {
+			curCPU, curMem, curDisk = u.CPUQuotaMilli, u.MemQuotaMB, u.DiskQuotaMB
+		}
 	} else {
-		err = s.store.GrantUserEndpointQuota(r.Context(), rr.UserID, rr.EndpointID, grantCPU, grantMem)
+		if g, ok, _ := s.store.GetUserEndpointQuota(r.Context(), rr.UserID, rr.EndpointID); ok {
+			curCPU, curMem, curDisk = g.CPUQuotaMilli, g.MemQuotaMB, g.DiskQuotaMB
+		}
+	}
+	pick := func(override, requested, current int) int {
+		if override > 0 {
+			return override
+		}
+		if requested > 0 {
+			return requested
+		}
+		return current
+	}
+	grantCPU := pick(req.GrantCPUMilli, rr.CPUMilli, curCPU)
+	grantMem := pick(req.GrantMemMB, rr.MemMB, curMem)
+	grantDisk := pick(req.GrantDiskMB, rr.DiskMB, curDisk)
+	// Grant on the environment the request targeted: the local host writes the
+	// user's base quota; a remote grants (or updates) the per-env quota, which
+	// also grants access to that host.
+	if rr.EndpointID == 0 {
+		err = s.store.UpdateUserQuota(r.Context(), rr.UserID, grantCPU, grantMem, grantDisk)
+	} else {
+		err = s.store.GrantUserEndpointQuota(r.Context(), rr.UserID, rr.EndpointID, grantCPU, grantMem, grantDisk)
 	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -435,7 +461,7 @@ func (s *Server) handleReviewRequest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "grantedCpuMilli": grantCPU, "grantedMemMB": grantMem})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "grantedCpuMilli": grantCPU, "grantedMemMB": grantMem, "grantedDiskMB": grantDisk})
 }
 
 // --- quota enforcement (used by deploy/edit) ---

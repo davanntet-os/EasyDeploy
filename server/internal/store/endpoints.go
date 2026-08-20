@@ -97,6 +97,7 @@ type EndpointGrant struct {
 	EndpointID    int64 `json:"endpointId"`
 	CPUQuotaMilli int   `json:"cpuQuotaMilli"`
 	MemQuotaMB    int   `json:"memQuotaMB"`
+	DiskQuotaMB   int   `json:"diskQuotaMB"`
 }
 
 // GetUserEndpointIDs returns the remote environment ids a user is granted.
@@ -119,7 +120,7 @@ func (s *Store) GetUserEndpointIDs(ctx context.Context, userID int64) ([]int64, 
 
 // GetUserEndpoints returns a user's environment grants with their per-env quota.
 func (s *Store) GetUserEndpoints(ctx context.Context, userID int64) ([]EndpointGrant, error) {
-	rows, err := s.pool.Query(ctx, `SELECT endpoint_id, cpu_quota_milli, mem_quota_mb FROM user_endpoints WHERE user_id = $1 ORDER BY endpoint_id`, userID)
+	rows, err := s.pool.Query(ctx, `SELECT endpoint_id, cpu_quota_milli, mem_quota_mb, disk_quota_mb FROM user_endpoints WHERE user_id = $1 ORDER BY endpoint_id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +128,7 @@ func (s *Store) GetUserEndpoints(ctx context.Context, userID int64) ([]EndpointG
 	out := []EndpointGrant{}
 	for rows.Next() {
 		var g EndpointGrant
-		if err := rows.Scan(&g.EndpointID, &g.CPUQuotaMilli, &g.MemQuotaMB); err != nil {
+		if err := rows.Scan(&g.EndpointID, &g.CPUQuotaMilli, &g.MemQuotaMB, &g.DiskQuotaMB); err != nil {
 			return nil, err
 		}
 		out = append(out, g)
@@ -150,7 +151,7 @@ func (s *Store) UserHasEndpoint(ctx context.Context, userID, endpointID int64) (
 func (s *Store) GetUserEndpointQuota(ctx context.Context, userID, endpointID int64) (EndpointGrant, bool, error) {
 	var g EndpointGrant
 	g.EndpointID = endpointID
-	err := s.pool.QueryRow(ctx, `SELECT cpu_quota_milli, mem_quota_mb FROM user_endpoints WHERE user_id = $1 AND endpoint_id = $2`, userID, endpointID).Scan(&g.CPUQuotaMilli, &g.MemQuotaMB)
+	err := s.pool.QueryRow(ctx, `SELECT cpu_quota_milli, mem_quota_mb, disk_quota_mb FROM user_endpoints WHERE user_id = $1 AND endpoint_id = $2`, userID, endpointID).Scan(&g.CPUQuotaMilli, &g.MemQuotaMB, &g.DiskQuotaMB)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return EndpointGrant{}, false, nil
 	}
@@ -169,9 +170,9 @@ func (s *Store) SetUserEndpoints(ctx context.Context, userID int64, grants []End
 	}
 	for _, g := range grants {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO user_endpoints (user_id, endpoint_id, cpu_quota_milli, mem_quota_mb) VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (user_id, endpoint_id) DO UPDATE SET cpu_quota_milli = EXCLUDED.cpu_quota_milli, mem_quota_mb = EXCLUDED.mem_quota_mb`,
-			userID, g.EndpointID, g.CPUQuotaMilli, g.MemQuotaMB); err != nil {
+			`INSERT INTO user_endpoints (user_id, endpoint_id, cpu_quota_milli, mem_quota_mb, disk_quota_mb) VALUES ($1, $2, $3, $4, $5)
+			 ON CONFLICT (user_id, endpoint_id) DO UPDATE SET cpu_quota_milli = EXCLUDED.cpu_quota_milli, mem_quota_mb = EXCLUDED.mem_quota_mb, disk_quota_mb = EXCLUDED.disk_quota_mb`,
+			userID, g.EndpointID, g.CPUQuotaMilli, g.MemQuotaMB, g.DiskQuotaMB); err != nil {
 			return err
 		}
 	}
@@ -180,10 +181,10 @@ func (s *Store) SetUserEndpoints(ctx context.Context, userID int64, grants []End
 
 // GrantUserEndpointQuota grants (or updates) a member's access + quota on one
 // remote environment. Used when approving a resource request for that host.
-func (s *Store) GrantUserEndpointQuota(ctx context.Context, userID, endpointID int64, cpuMilli, memMB int) error {
+func (s *Store) GrantUserEndpointQuota(ctx context.Context, userID, endpointID int64, cpuMilli, memMB, diskMB int) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO user_endpoints (user_id, endpoint_id, cpu_quota_milli, mem_quota_mb) VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (user_id, endpoint_id) DO UPDATE SET cpu_quota_milli = EXCLUDED.cpu_quota_milli, mem_quota_mb = EXCLUDED.mem_quota_mb`,
-		userID, endpointID, cpuMilli, memMB)
+		`INSERT INTO user_endpoints (user_id, endpoint_id, cpu_quota_milli, mem_quota_mb, disk_quota_mb) VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (user_id, endpoint_id) DO UPDATE SET cpu_quota_milli = EXCLUDED.cpu_quota_milli, mem_quota_mb = EXCLUDED.mem_quota_mb, disk_quota_mb = EXCLUDED.disk_quota_mb`,
+		userID, endpointID, cpuMilli, memMB, diskMB)
 	return err
 }

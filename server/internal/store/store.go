@@ -195,7 +195,23 @@ CREATE TABLE IF NOT EXISTS user_endpoints (
 ALTER TABLE user_endpoints ADD COLUMN IF NOT EXISTS cpu_quota_milli INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE user_endpoints ADD COLUMN IF NOT EXISTS mem_quota_mb    INTEGER NOT NULL DEFAULT 0;
 -- Resource requests target a specific environment (0 = local).
-ALTER TABLE resource_requests ADD COLUMN IF NOT EXISTS endpoint_id BIGINT NOT NULL DEFAULT 0;`
+ALTER TABLE resource_requests ADD COLUMN IF NOT EXISTS endpoint_id BIGINT NOT NULL DEFAULT 0;
+-- Storage (disk) quota, mirroring CPU/RAM: a member's total volume-size budget,
+-- local (users) and per remote environment (user_endpoints). 0 = none granted.
+ALTER TABLE users              ADD COLUMN IF NOT EXISTS disk_quota_mb  BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE user_endpoints     ADD COLUMN IF NOT EXISTS disk_quota_mb  BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE resource_requests  ADD COLUMN IF NOT EXISTS disk_mb        BIGINT NOT NULL DEFAULT 0;
+-- Per-volume size budget (app-level accounting; Docker local volumes are not
+-- byte-capped). Keyed by (environment, volume name); owner mirrors the volume's
+-- easydeploy.owner label so quota can be summed without inspecting Docker.
+CREATE TABLE IF NOT EXISTS volume_specs (
+    endpoint_id BIGINT NOT NULL DEFAULT 0,
+    name        TEXT   NOT NULL,
+    owner       TEXT   NOT NULL DEFAULT '',
+    size_mb     BIGINT NOT NULL DEFAULT 0,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (endpoint_id, name)
+);`
 	if _, err := s.pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}

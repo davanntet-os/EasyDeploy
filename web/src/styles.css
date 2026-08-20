@@ -329,6 +329,13 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent); box-sh
 
 @media (max-width: 560px) { .reg-grid { grid-template-columns: 1fr; } }
 
+/* volume size budget: create/resize modal + table */
+.size-row { display: flex; gap: 8px; }
+.size-row input { flex: 1; }
+.size-row select { width: 84px; flex: none; }
+.req { color: var(--accent); }
+.over-budget { color: var(--warn); font-weight: 600; }
+
 .login { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
 .login-card { display: flex; flex-direction: column; gap: 14px; width: min(360px, 90vw); background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 34px; box-shadow: var(--shadow-3); }
 .login-card h1 { margin: 0; font-size: 22px; }
