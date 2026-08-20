@@ -1386,7 +1386,7 @@ function ContainerEditor({
 // plane that makes Routes/Services work on that host. On the local host it
 // renders nothing (the local Envoy is always present). Placed atop the Routes
 // and Services tabs so a remote deploy has somewhere to publish to.
-function EdgeBanner() {
+function EdgeBanner({ isAdmin }: { isAdmin: boolean }) {
   const [envId, setEnvId] = useState(environment.get());
   const [status, setStatus] = useState<EdgeStatus | null | undefined>(undefined);
   const [busy, act] = useAction();
@@ -1394,13 +1394,16 @@ function EdgeBanner() {
   useEffect(() => environment.subscribe(() => setEnvId(environment.get())), []);
 
   const load = () => {
-    if (envId === 0) return;
+    if (envId === 0 || !isAdmin) return;
     setStatus(undefined);
     api.edgeStatus(envId).then(setStatus).catch(() => setStatus(null));
   };
-  useEffect(load, [envId]);
+  useEffect(load, [envId, isAdmin]);
 
   if (envId === 0) return null; // local host runs its own Envoy
+  // The edge proxy is admin-managed infrastructure; members can't query its
+  // status or deploy it, so the banner is hidden for them.
+  if (!isAdmin) return null;
 
   const deploy = async () => {
     const ok = await act(api.deployEdge(envId), { success: "Edge proxy deployed" });
@@ -1465,10 +1468,10 @@ function Routes() {
     }
   };
   if (err) return <Err msg={err} onRetry={reload} />;
-  if (!list) return (<><EdgeBanner /><TableSkeleton cols={3} /></>);
+  if (!list) return (<><EdgeBanner isAdmin={true} /><TableSkeleton cols={3} /></>);
   return (
     <>
-    <EdgeBanner />
+    <EdgeBanner isAdmin={true} />
     <div className="table-wrap"><table>
       <thead>
         <tr>
@@ -2797,11 +2800,11 @@ function Services({ me, onChanged }: { me: Me | null; onChanged: () => void }) {
   };
 
   if (err) return <Err msg={err} onRetry={reload} />;
-  if (!list) return (<><EdgeBanner /><CardSkeleton count={4} /></>);
+  if (!list) return (<><EdgeBanner isAdmin={me?.role === "admin"} /><CardSkeleton count={4} /></>);
 
   return (
     <>
-      <EdgeBanner />
+      <EdgeBanner isAdmin={me?.role === "admin"} />
       <div className="toolbar">
         <button type="button" className="primary" onClick={() => setCreating(true)}>
           <Icon.Plus size={15} />
