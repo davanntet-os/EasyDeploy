@@ -1,0 +1,73 @@
+name: Bug report
+description: Report something that isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! Please do **not** report
+        security vulnerabilities here — see our [Security Policy](../security/policy).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, and what you expected instead.
+      placeholder: When I ..., EasyDeploy ... but I expected ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce it?
+      placeholder: |
+        1. Go to '...'
+        2. Click '...'
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / screenshots
+      description: Server logs, browser console output, or screenshots. This is automatically formatted as code.
+      render: shell
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: The EasyDeploy release tag or git commit you're running.
+      placeholder: v0.2.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the app?
+      options:
+        - Containers
+        - Services / routing (Envoy)
+        - Volumes / storage quota
+        - Networks
+        - Registries
+        - Multi-host / environments
+        - Users / quota / requests
+        - Public exposure (tunnels)
+        - Web UI (other)
+        - Not sure
+    validations:
+      required: false
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Docker version, how you run EasyDeploy (compose / dev / binary), local vs remote host.
+      placeholder: |
+        - OS: macOS 15 / Ubuntu 24.04
+        - Docker: 27.x
+        - Run via: docker compose
+    validations:
+      required: false
