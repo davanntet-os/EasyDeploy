@@ -11,3 +11,7 @@
 # Editor / OS
 .DS_Store
 *.local
+
+# Local tooling / assistant config
+.claude/
+CLAUDE.md
